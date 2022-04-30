@@ -61,6 +61,8 @@ namespace ExtendedEvents {
 
         private static readonly Color ColorError = Color.red;
 
+        private static readonly Color ColorNot = Color.red;
+
         private static readonly Color ColorObjectIsAsset = new Color(0.8f, 0.8f, 1f);
 
         private static readonly string[] TypeNameReplaced = new string[] { ", Version=", ", Culture=", ", PublicKeyToken=", ", Assembly-CSharp", ", mscorlib", ", UnityEngine." };
@@ -99,19 +101,17 @@ namespace ExtendedEvents {
 
         private static ArgumentMap CopiedArgument;
 
-        private static Type CopiedType;
-
         private static Type PropertyType;
 
-        private static Dictionary<MethodInfo, MethodCache> CachedReflection = new Dictionary<MethodInfo, MethodCache>();
+        private static Dictionary<string, MethodCache> CachedReflection = new Dictionary<string, MethodCache>();
+
+        private static Dictionary<Type, TypeCache> CachedTypes = new Dictionary<Type, TypeCache>();
 
         private static FieldInfo PropertyAttributeField = typeof(PropertyDrawer).GetField("m_Attribute", BindingFlags.Instance | BindingFlags.NonPublic);
 
         private static FieldInfo PropertyFieldInfoField = typeof(PropertyDrawer).GetField("m_FieldInfo", BindingFlags.Instance | BindingFlags.NonPublic);
 
         private static Action<ArgumentDrawer, MethodInfo, ParameterInfo, Type, Attribute> ArgumentDrawerSetupDelegate = MakeArgumentDrawerSetupDelegate();
-
-        private static Dictionary<Type, TypeCache> CachedTypes = new Dictionary<Type, TypeCache>();
 
         private static GUIContent CustomEventArg = new GUIContent("Event arg", "Custom event argument");
 
@@ -249,17 +249,19 @@ namespace ExtendedEvents {
             CopyID,
             PasteID,
             RandomizeID,
+
+            MakeCachedCall,
+            ToggleModifyFlag,
         }
 
         enum ArgumentOperation {
             Nothing,
             ToggleModifyFlag,
-            PasteEventID,
+            PasteID,
             Copy,
             CopyID,
             Paste,
             MakeCachedArgument,
-            SetEnumerator,
             CopyParameterType,
             CopyArgumentType,
             TogglePreview,
@@ -532,7 +534,7 @@ namespace ExtendedEvents {
             if (!canBeNull && !objectArgument.objectReferenceValue) {
                 GUI.backgroundColor = ColorError;
             }
-            ObjectField(position, objectArgument, label, desiredType);
+            ObjectField(position, objectArgument, desiredType, label);
             GUI.backgroundColor = backgroundColor;
         }
 
@@ -911,7 +913,7 @@ namespace ExtendedEvents {
             property.intValue = EditorGUI.MaskField(position, label, property.intValue, LayerNames);
         }
 
-        public static void ObjectField(Rect position, SerializedProperty property, GUIContent label, Type desiredType) {
+        public static void ObjectField(Rect position, SerializedProperty property, Type desiredType, GUIContent label) {
             EditorGUI.BeginProperty(position, GUIContent.none, property);
 
             EditorGUI.BeginChangeCheck();
@@ -986,7 +988,6 @@ namespace ExtendedEvents {
                 case SerializedPropertyType.Color:
                     prop.colorValue = TypeCasterUtility.Cast<Color>(obj);
                     break;
-                case SerializedPropertyType.Generic:
                 case SerializedPropertyType.ObjectReference:
                     prop.objectReferenceValue = obj as Object;
                     break;
@@ -1036,14 +1037,13 @@ namespace ExtendedEvents {
 
         private static bool CheckMethodForFunc(MethodInfo method, Type parameterType) {
             if (parameterType == null) return true;
-
-            if (!parameterType.IsCastableFrom(method.ReturnType, true)) return false;
-
-            return true;
+            if (parameterType.IsCastableFrom(method.ReturnType, true)) return true;
+            if (parameterType.IsCastableFrom(CachedData.GetCachedDataType(GetSerializableMethodName(method)), false)) return true;
+            return false;
         }
 
         private static void ClearEventFunction(object source) {
-            ((ExtendedEventFunction)source).Clear();
+            ((CallMethodMap)source).Clear();
         }
 
         private static void DrawPreviewer(Rect position, SerializedProperty property, MethodCache method) {
@@ -1145,7 +1145,7 @@ namespace ExtendedEvents {
                                     selectTypeMenu.AddSeparator("");
                                     addSeparator = false;
                                 }
-                                selectTypeMenu.AddItem(new GUIContent(t), t == GetSerializableTypeName(reflectedType), func, new PropertyValue<string>(property, t));
+                                selectTypeMenu.AddItem(new GUIContent(t), t == reflectedTypeName, func, new PropertyValue<string>(property, t));
                                 maxCount--;
                                 if (maxCount <= 0) {
                                     Debug.LogWarning("Too many matches, try better specify type name");
@@ -1172,38 +1172,37 @@ namespace ExtendedEvents {
             else ExposedMethodSignaturePath = path;
         }
 
-        private static MethodCache FindArgumentFunc(SerializedProperty argument) {
-            MethodInfo method = ExtendedEvent.FindMethod(argument.FindPropertyRelative(StringArgumentFieldName).stringValue);
 
-            return FindMethod(method);
-        }
 
-        private static MethodCache FindMethod(MethodInfo method) {
-            if (method == null) return null;
+        private static MethodCache FindMethod(string methodSignature) {
             MethodCache cache;
-            if (CachedReflection.TryGetValue(method, out cache)) return cache;
+            if (CachedReflection.TryGetValue(methodSignature, out cache)) return cache;
             else {
-                cache = new MethodCache(method);
-                CachedReflection.Add(method, cache);
+                Type cachedDataType = CachedData.GetCachedDataType(methodSignature);
+                if (cachedDataType == null) {
+                    cache = null;
+                }
+                else if(cachedDataType.Name.StartsWith("CachedArgument")) {
+                    cache = new MethodCache(ExtendedEvent.GetType(methodSignature));
+                }
+                else {
+                    MethodInfo method = CachedData.GetMethodInfo(methodSignature);
+                    cache = new MethodCache(method);
+                }
+                CachedReflection.Add(methodSignature, cache);
                 return cache;
             }
         }
 
+        private static MethodCache FindArgumentFunc(SerializedProperty argument) {
+            return FindMethod(argument.FindPropertyRelative(StringArgumentFieldName).stringValue);
+        }
+
         private static MethodCache FindMethod(SerializedProperty call) {
-            var methodName = call.FindPropertyRelative(MethodNameFieldName);
-
-            MethodInfo method = ExtendedEvent.FindMethod(methodName.stringValue);
-
-            return FindMethod(method);
+            return FindMethod(call.FindPropertyRelative(MethodNameFieldName).stringValue);
         }
 
-        /*
-        private static void InsertAtIndex(SerializedProperty calls, int index) {
-            uint id = GenerateID(calls);
-            calls.InsertArrayElementAtIndex(index);
-            calls.GetArrayElementAtIndex(index).FindPropertyRelative(kID).longValue = id;
-        }
-        */
+
         private static int GenerateID(SerializedProperty calls) {
             System.Random random = new System.Random();
             //return random.Next(int.MinValue, int.MaxValue);
@@ -1227,7 +1226,7 @@ namespace ExtendedEvents {
             Type[] argumentTypes = new Type[arguments.arraySize];
             if (method != null) {
                 TypeCache[] parameters = method.GetParameterTypes(true);
-                for (int i = 0; i < parameters.Length; i++) {
+                for (int i = 0; i < Mathf.Min(argumentTypes.Length, parameters.Length); i++) {
                     argumentTypes[i] = parameters[i].type;
                 }
             }
@@ -1394,20 +1393,6 @@ namespace ExtendedEvents {
             else return type.DisplayName;
         }
 
-        private static int GetForeachIndex(SerializedProperty call, SerializedProperty arguments) {
-            int foreachIndex = -1;
-            EventCall.Definition argumentSpecialFlags = (EventCall.Definition)call.FindPropertyRelative(CallDefinionFieldName).intValue;
-
-            if (argumentSpecialFlags != 0) {
-                for (int i = 0; i < arguments.arraySize; i++) {
-                    if ((argumentSpecialFlags & (EventCall.Definition)(1 << i)) != 0) {
-                        foreachIndex = i;
-                        break;
-                    }
-                }
-            }
-            return foreachIndex;
-        }
 
         private static object GetFuncArgument(SerializedProperty prop, Type type) {
             TypeEnum typeEnum = GetTypeEnum(type);
@@ -1799,7 +1784,7 @@ namespace ExtendedEvents {
         }
 
         private static void SetEventFunction(object source) {
-            ((ExtendedEventFunction)source).Assign();
+            ((CallMethodMap)source).Assign();
         }
 
         private static void SetFuncArgumentType(object data) {
@@ -1912,7 +1897,7 @@ namespace ExtendedEvents {
             floatProperty.floatValue = EditorGUI.FloatField(wRect, GetLabel("w", wRect), floatProperty.floatValue);
         }
 
-        public void DrawArgumentContext(SerializedProperty call, int argumentIndex, Type parameterType, bool isEnumerable) {
+        public void DrawArgumentContext(SerializedProperty call, int argumentIndex, Type parameterType, bool isCallArgument) {
             SerializedProperty argument = call.FindPropertyRelative(ArgumentsFieldName).GetArrayElementAtIndex(argumentIndex);
 
             var previewFunc = argument.FindPropertyRelative(FuncPreviewFieldName);
@@ -1934,18 +1919,21 @@ namespace ExtendedEvents {
 
             Type copiedType = GetCopiedType();
 
-            context.AddItem(new GUIContent("Argument type / Data"), argumentTypeEnum == ArgType.Data, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.None));
-            context.AddSeparator("Argument type /");
-            context.AddItem(new GUIContent("Argument type / Func"), argumentTypeEnum == ArgType.Method, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.IsMethod));
-            if (settings.parented) {
+
+            if (!isCallArgument) {
+                context.AddItem(new GUIContent("Argument type / Data"), argumentTypeEnum == ArgType.Data, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.None));
                 context.AddSeparator("Argument type /");
-                context.AddItem(new GUIContent("Argument type / Parent"), argumentTypeEnum == ArgType.Parent, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsParent));
+                context.AddItem(new GUIContent("Argument type / Func"), argumentTypeEnum == ArgType.Method, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.IsMethod));
+                if (settings.parented != ExtendedEventAttribute.ParentType.Unparented) {
+                    context.AddSeparator("Argument type /");
+                    context.AddItem(new GUIContent("Argument type / Parent"), argumentTypeEnum == ArgType.Parent, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsParent));
+                }
+                context.AddSeparator("Argument type /");
+                context.AddItem(new GUIContent("Argument type / ID Reference"), argumentTypeEnum == ArgType.IDReference, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsIDReference));
+                context.AddItem(new GUIContent("Argument type / Tag Reference"), argumentTypeEnum == ArgType.TagReference, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsTagReference));
+                context.AddSeparator("Argument type /");
+                context.AddItem(new GUIContent("Argument type / Custom Event Args"), argumentTypeEnum == ArgType.CustomEventArg, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsCustomEventArgs));
             }
-            context.AddSeparator("Argument type /");
-            context.AddItem(new GUIContent("Argument type / ID Reference"), argumentTypeEnum == ArgType.IDReference, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsIDReference));
-            context.AddItem(new GUIContent("Argument type / Tag Reference"), argumentTypeEnum == ArgType.TagReference, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsTagReference));
-            context.AddSeparator("Argument type /");
-            context.AddItem(new GUIContent("Argument type / Custom Event Args"), argumentTypeEnum == ArgType.CustomEventArg, SetArgumentType, new PropertyValue<Argument.Definition>(definitionArgument, Argument.Definition.Arg1IsCustomEventArgs));
 
             if (argumentTypeEnum == ArgType.Method) {
                 if (isNegated || typeof(bool).IsCastableFrom(parameterType, false)) {
@@ -1954,19 +1942,10 @@ namespace ExtendedEvents {
                 }
             }
 
-            if (isCachedArgument || argumentTypeEnum == ArgType.Method) {
+            if (isCachedArgument || (argumentTypeEnum == ArgType.Method && FindArgumentFunc(argument) != null && FindArgumentFunc(argument).ReturnType.type != typeof(void))) {
                 context.AddSeparator("");
                 context.AddItem(new GUIContent("Cache argument"), isCachedArgument, CallArgumentOperation, contextData.SetOperation(ArgumentOperation.MakeCachedArgument));
 
-            }
-
-            context.AddSeparator("");
-
-            context.AddItem(new GUIContent("Make iterator"), isEnumerable, CallArgumentOperation, contextData.SetOperation(ArgumentOperation.SetEnumerator));
-
-            if (parameterTypeEnum == TypeEnum.Integer && CopiedEvents.Count == 1) {
-                context.AddSeparator("");
-                context.AddItem(new GUIContent("Paste event id"), false, CallArgumentOperation, contextData.SetOperation(ArgumentOperation.PasteEventID));
             }
 
             context.AddSeparator("");
@@ -1983,6 +1962,15 @@ namespace ExtendedEvents {
                 if (argumentTypeEnum != ArgType.Method) argumentType = FindArgumentFunc(argument)?.ReturnType.type ?? parameterType;
                 else if (parameterTypeEnum == TypeEnum.Object && objectArgument.objectReferenceValue) argumentType = objectArgument.objectReferenceValue.GetType();
             }
+            else {
+                if (int.TryParse(EditorGUIUtility.systemCopyBuffer, out int id)) {
+                    Vector2Int dataAddress = GetDataAddress(listenersArray, id);
+                    if (dataAddress.x != -1) {
+                        context.AddSeparator("");
+                        context.AddItem(new GUIContent($"Paste id {id}"), false, CallArgumentOperation, contextData.SetOperation(ArgumentOperation.PasteID));
+                    }
+                }
+            }
 
             if (argumentType != parameterType)
                 context.AddItem(new GUIContent($"Copy argument type {GetDisplayTypeName(argumentType)}"), false, CallArgumentOperation, contextData.SetOperation(ArgumentOperation.CopyArgumentType));
@@ -1996,6 +1984,8 @@ namespace ExtendedEvents {
         }
 
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label) {
+            if (property.serializedObject.isEditingMultipleObjects) return 0;
+
             if (!property.isExpanded) return EditorGUIUtility.singleLineHeight + EditorGUIUtility.standardVerticalSpacing;
 
             RestoreState(property);
@@ -2060,8 +2050,6 @@ namespace ExtendedEvents {
                         currentY += callHeight;
                     }
 
-                    //refIndex = (e.mousePosition.y - (position.yMin + 16)) / GetSingleHeight();
-
                     GenericMenu context = new GenericMenu();
 
                     CallContextData contextData = new CallContextData(listenersArray, GetElementIndex(listenersArray));
@@ -2107,9 +2095,31 @@ namespace ExtendedEvents {
                     }
                     if (listenersArray.arraySize > 0) {
                         context.AddSeparator("");
+
+                        SerializedProperty call = listenersArray.GetArrayElementAtIndex(GetElementIndex(listenersArray));
+                        EventCall.Definition callSpecialFlags = (EventCall.Definition)call.FindPropertyRelative(CallDefinionFieldName).intValue;
+
+                        MethodCache method = FindMethod(call);
+                        bool isNegated = (callSpecialFlags & EventCall.Definition.NegateBool) != 0;
+                        bool isCachedCall = (callSpecialFlags & EventCall.Definition.CacheReturnValue) != 0;
+
                         context.AddItem(new GUIContent($"Copy call ID: {property.FindPropertyRelative(CallsFieldName).GetArrayElementAtIndex(GetElementIndex(listenersArray)).FindPropertyRelative(IDFieldName).intValue}"), false, CallContextOperation, contextData.SetOperation(ContextOperation.CopyID));
                         if (int.TryParse(EditorGUIUtility.systemCopyBuffer, out int temp)) context.AddItem(new GUIContent($"Paste ID: {temp}"), false, CallContextOperation, contextData.SetOperation(ContextOperation.PasteID));
                         context.AddItem(new GUIContent("Randomize ID"), false, CallContextOperation, contextData.SetOperation(ContextOperation.RandomizeID));
+
+                        if (method != null) {
+                            if (isNegated || typeof(bool).IsCastableFrom(method.ReturnType.type, false)) {
+                                context.AddSeparator("");
+                                context.AddItem(new GUIContent("Negate bool"), isNegated, CallContextOperation, contextData.SetOperation(ContextOperation.ToggleModifyFlag));
+                            }
+                        }
+
+                        if (isCachedCall || (method != null && method.ReturnType.type != typeof(void))) {
+                            context.AddSeparator("");
+                            context.AddItem(new GUIContent("Cache call"), isCachedCall, CallContextOperation, contextData.SetOperation(ContextOperation.MakeCachedCall));
+                        }
+
+
                     }
 
                     context.ShowAsContext();
@@ -2149,8 +2159,8 @@ namespace ExtendedEvents {
 
             //FixMethodNames = EditorGUI.Toggle(headerRect, FixMethodNames);
 
-            if (settings.parented) {
-                DrawIsParentField(headerRect, new GUIContent(labelText), false);
+            if (parentProperty.objectReferenceValue || settings.parented == ExtendedEventAttribute.ParentType.Parented) {
+                DrawParentField(headerRect, new GUIContent(labelText), false);
             }
             else {
                 EditorGUI.LabelField(headerRect, new GUIContent(labelText));
@@ -2186,13 +2196,11 @@ namespace ExtendedEvents {
 
             lastSelectedIndex = list.index;
             var pListener = listenersArray.GetArrayElementAtIndex(list.index);
-            if (pListener.FindPropertyRelative(ArgumentsFieldName).arraySize == 0) new ExtendedEventFunction(pListener, null, null).Clear();
+            if (pListener.FindPropertyRelative(ArgumentsFieldName).arraySize == 0) new CallMethodMap(pListener, null, null).Clear();
         }
 
         private void AddFunctionForScript(GenericMenu menu, SerializedProperty listener, ValidMethodMap method, string targetName, bool addGroupName, MethodCache currentMethod) {
-            if (!settings.parented && method.methodInfo.ReturnType == typeof(IEnumerator)) {
-                return;
-            }
+            bool propertyIsArgument = PropertyIsArgument(listener);
 
             string groupName = null;
             string methodType = null;
@@ -2217,7 +2225,7 @@ namespace ExtendedEvents {
             // find the current event target...
             Object listenerTarget;
 
-            if (PropertyIsArgument(listener)) {
+            if (propertyIsArgument) {
                 listenerTarget = listener.FindPropertyRelative(ObjectArgumentFieldName).objectReferenceValue;
             }
             else {
@@ -2232,13 +2240,13 @@ namespace ExtendedEvents {
 
             GenericMenu.MenuFunction2 func;
             object data;
-            if (PropertyIsArgument(listener)) {
-                func = FuncPopupDrawer.SetArgFunction;
-                data = new FuncPopupDrawer.GetArgFunction(listener, method.target, method.methodInfo);
+            if (propertyIsArgument) {
+                func = SetArgFunction;
+                data = new ArgumentMethodMap(listener, method.target, method.methodInfo);
             }
             else {
                 func = SetEventFunction;
-                data = new ExtendedEventFunction(listener, method.target, method.methodInfo);
+                data = new CallMethodMap(listener, method.target, method.methodInfo);
             }
 
             menu.AddItem(new GUIContent(path), isCurrentlySet, func, data);
@@ -2257,32 +2265,33 @@ namespace ExtendedEvents {
                 var call = calls.GetArrayElementAtIndex(i);
                 var arguments = call.FindPropertyRelative(ArgumentsFieldName);
                 MethodCache callMethod = FindMethod(call);
-                TypeCache callType = GetTypeCache(ExtendedEvent.GetType(call.FindPropertyRelative(MethodNameFieldName).stringValue));
 
                 string callName = null;
                 if (callMethod != null) callName = $"{callMethod.DisplayName}";
-                else if (callType != null) callName = $"{callType.DisplayName}";
 
                 string guiContent = $"{TagToString(call)} / Call {i}. {callName}";
 
                 string addCallName = null;
                 if (arguments.arraySize > 0) addCallName = $" / {callName}";
 
-                if (callMethod != null || callType != null) {
-                    Type callReturnType = callMethod?.ReturnType.type ?? callType.type;
-                    string callReturnTypeDisplayName = callMethod?.DisplayName ?? callType.DisplayName;
+                if (callMethod != null) {
+                    Type callReturnType = callMethod?.ReturnType.type;
+                    string callReturnTypeDisplayName = callMethod?.DisplayName;
 
                     string argName = null;
                     if (desiredType.IsCastableFrom(callReturnType, false)) argName = callReturnTypeDisplayName;
                     else if (desiredType.IsCastableFrom(callReturnType, true)) argName = $"{callReturnTypeDisplayName} as {GetDisplayTypeName(desiredType)}";
+                    else {
+                        Type cachedDataType = CachedData.GetCachedDataType(call.FindPropertyRelative(MethodNameFieldName).stringValue);
+                        if (desiredType.IsCastableFrom(cachedDataType, false)) argName = $"{callReturnTypeDisplayName} as {cachedDataType.Name}";
+                    }
+
                     if (argName != null) {
-                        menu.AddItem(new GUIContent(arguments.arraySize != 0 ? $"{guiContent}{addCallName}" : guiContent),
+                        menu.AddItem(new GUIContent(arguments.arraySize != 0 ? $"{guiContent}{addCallName}{argName}" : guiContent),
                             id.intValue == call.FindPropertyRelative(IDFieldName).intValue,
                             SetInt, new PropertyValue<int>(id, call.FindPropertyRelative(IDFieldName).intValue));
                     }
                 }
-
-                if (callType != null) continue;
 
                 Type[] argumentTypes = GetArgumentTypes(call, callMethod);
 
@@ -2307,6 +2316,10 @@ namespace ExtendedEvents {
                         if (argType != null) {
                             if (desiredType.IsCastableFrom(argType, false)) argName = GetDisplayTypeName(argType);
                             else if (desiredType.IsCastableFrom(argType, true)) argName = $"{GetDisplayTypeName(argType)} as {GetDisplayTypeName(desiredType)}";
+                            else {
+                                Type cachedDataType = CachedData.GetCachedDataType(GetSerializableTypeName(argType));
+                                if (desiredType.IsCastableFrom(cachedDataType, false)) argName = $"{GetDisplayTypeName(argType)} as {cachedDataType.Name}";
+                            }
                         }
                     }
 
@@ -2332,75 +2345,114 @@ namespace ExtendedEvents {
             object data;
 
             if (PropertyIsArgument(listener)) {
-                func = FuncPopupDrawer.ClearArgFunction;
-                data = new FuncPopupDrawer.GetArgFunction(listener, null, null);
+                func = ClearArgFunction;
+                data = new ArgumentMethodMap(listener, null, null);
             }
             else {
                 func = ClearEventFunction;
-                data = new ExtendedEventFunction(listener, null, null);
+                data = new CallMethodMap(listener, null, null);
             }
             menu.AddItem(new GUIContent(GetEmptyMethodName(GetTypeCache(reflectedType))), string.IsNullOrEmpty(methodName.stringValue), func, data);
 
             menu.AddSeparator("");
 
-            //special case for components... we want all the game objects targets there!
-            if (!target) {
-                GeneratePopUpForType(menu, null, reflectedType, null, listener, desiredType, currentMethod, desiredMethodName);
-                return menu;
-            }
-            if (reflectedType != null) {
-                GeneratePopUpForType(menu, null, reflectedType, target != null ? reflectedType.Name : null, listener, desiredType, currentMethod, desiredMethodName);
-                GeneratePopUpForType(menu, target, reflectedType, target != null ? reflectedType.Name : null, listener, desiredType, currentMethod, desiredMethodName);
+            HashSet<Type> allTypes = new HashSet<Type>();
 
-            }
+            if (target) {
+                GameObject targetGameObject = GetGameObject(target);
+                if (targetGameObject) {
+                    GeneratePopUpForType(menu, targetGameObject, typeof(GameObject), targetGameObject.GetType().Name, listener, desiredType, currentMethod, desiredMethodName);
+                    allTypes.Add(typeof(GameObject));
+                }
+                Object[] objects;
+                List<string> duplicateNames;
+                if (targetGameObject) {
+                    objects = targetGameObject.GetComponents<Component>();
+                    duplicateNames = objects.Select(c => c.GetType().FullName).GroupBy(x => x).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+                }
+                else {
+                    objects = new Object[] { target };
+                    duplicateNames = new List<string>();
+                }
+                foreach (Object o in objects) {
+                    HashSet<Type> castedTypes = new HashSet<Type>();
 
-            if (!target) return menu;
-            var targetGameObject = GetGameObject(target);
-            if (targetGameObject) GeneratePopUpForType(menu, targetGameObject, typeof(GameObject), targetGameObject.GetType().Name, listener, desiredType, currentMethod, desiredMethodName);
-            Object[] objects;
-            List<string> duplicateNames;
-            if (targetGameObject) {
-                objects = targetGameObject.GetComponents<Component>();
-                duplicateNames = objects.Select(c => c.GetType().FullName).GroupBy(x => x).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
-            }
-            else {
-                objects = new Object[] { target };
-                duplicateNames = new List<string>();
-            }
-            foreach (Object o in objects) {
-                HashSet<Type> castedTypes = new HashSet<Type>();
+                    Type type = o.GetType();
+                    allTypes.Add(type);
+                    foreach (MethodInfo caster in TypeCasterUtility.GetCasters(type)) {
+                        Type castedType = caster.ReturnType;
+                        allTypes.Add(castedType);
 
-                Type type = o.GetType();
-                foreach (MethodInfo caster in TypeCasterUtility.GetCasters(type)) {
-                    Type castedType = caster.ReturnType;
-
-                    if (castedType.IsAssignableFrom(type)) {
-                        continue;
-                    }
-
-                    switch (GetTypeEnum(castedType)) {
-                        default:
+                        if (castedType.IsAssignableFrom(type)) {
                             continue;
-                        case TypeEnum.Object:
-                        case TypeEnum.Generic:
-                            break;
+                        }
+
+                        switch (GetTypeEnum(castedType)) {
+                            default:
+                                continue;
+                            case TypeEnum.Object:
+                            case TypeEnum.Generic:
+                                break;
+                        }
+                        if (ArgumentType.IsAssignableFrom(castedType)) {
+                            continue;
+                        }
+                        castedTypes.Add(castedType);
                     }
-                    if (ArgumentType.IsAssignableFrom(castedType)) {
-                        continue;
+
+                    string name = type.Name;
+                    if (duplicateNames.Contains(type.FullName)) {
+                        name = $"{type.Name} id: {o.GetInstanceID()}";
                     }
-                    castedTypes.Add(castedType);
+
+                    if (castedTypes.Count > 0) {
+                        name = $"{name} / {type.Name}";
+                    }
+
+                    GeneratePopUpForType(menu, o, type, name, listener, desiredType, currentMethod, desiredMethodName);
+
+
+                    foreach (var castedType in castedTypes) {
+                        GeneratePopUpForType(menu, o, castedType, $"{name} as {castedType.Name}", listener, desiredType, currentMethod, desiredMethodName);
+                    }
                 }
-
-                var name = duplicateNames.Contains(type.FullName) ? $"{type.Name} id: {o.GetInstanceID()}" : type.Name;
-                GeneratePopUpForType(menu, o, type, (objects.Length + castedTypes.Count > (targetGameObject ? 0 : 1)) ? name : null, listener, desiredType, currentMethod, desiredMethodName);
-
-
-                foreach (var castedType in castedTypes) {
-                    GeneratePopUpForType(menu, o, castedType, $"{name} as {castedType.Name}", listener, desiredType, currentMethod, desiredMethodName);
-                }
-
-
             }
+
+            if (reflectedType == null) reflectedType = typeof(object);
+
+            bool generateForReflectedType = true;
+            foreach (Type type in allTypes) {
+                if (reflectedType.IsAssignableFrom(type)) {
+                    generateForReflectedType = false;
+                    break;
+                }
+            }
+            if (generateForReflectedType) GeneratePopUpForType(menu, target, reflectedType, reflectedType.Name, listener, desiredType, currentMethod, desiredMethodName);
+
+            if (desiredType != null && !desiredType.IsAssignableFrom(reflectedType)) {
+                bool generateForDesiredType = true;
+                foreach (Type type in allTypes) {
+                    if (desiredType.IsAssignableFrom(type)) {
+                        generateForDesiredType = false;
+                        break;
+                    }
+                }
+                if (generateForDesiredType) GeneratePopUpForType(menu, target, desiredType, desiredType.Name, listener, desiredType, currentMethod, desiredMethodName);
+            }
+
+            Type copiedType = GetCopiedType();
+
+            if (copiedType != null && !copiedType.IsAssignableFrom(reflectedType) && !copiedType.IsAssignableFrom(desiredType)) {
+                bool generateForCopiedType = true;
+                foreach (Type type in allTypes) {
+                    if (copiedType.IsAssignableFrom(type)) {
+                        generateForCopiedType = false;
+                        break;
+                    }
+                }
+                if (generateForCopiedType) GeneratePopUpForType(menu, target, copiedType, copiedType.Name, listener, desiredType, currentMethod, desiredMethodName);
+            }
+
 
             return menu;
         }
@@ -2425,18 +2477,17 @@ namespace ExtendedEvents {
         private void CopyOne(object data) {
             SerializedProperty listenersArray = (SerializedProperty)data;
 
-            CopiedEvents.Clear();
 
             SerializedProperty selectedProperty = listenersArray.GetArrayElementAtIndex(GetElementIndex(listenersArray));
-            CopiedTag = null;
+            CopiedTag = TagToString(selectedProperty);
 
+            CopiedEvents.Clear();
             CopiedEvents.Add(new CallMap(selectedProperty));
         }
 
         private void CopyTag(object data) {
             SerializedProperty listenersArray = (SerializedProperty)data;
 
-            CopiedEvents.Clear();
 
 
             SerializedProperty selectedProperty = listenersArray.GetArrayElementAtIndex(GetElementIndex(listenersArray));
@@ -2444,6 +2495,7 @@ namespace ExtendedEvents {
 
             SerializedProperty selectedTagProperty = selectedProperty.FindPropertyRelative(TagFieldName);
 
+            CopiedEvents.Clear();
             for (int i = 0; i < listenersArray.arraySize; i++) {
                 var currentElement = listenersArray.GetArrayElementAtIndex(i);
                 var map = new CallMap(currentElement);
@@ -2453,8 +2505,8 @@ namespace ExtendedEvents {
 
         private void DelayModeField(Rect position, SerializedProperty property) {
             Enum delayModeValue;
-            if (settings.parented) delayModeValue = (DelayMode)property.intValue;
-            else delayModeValue = (DelayModeInstantOnly)property.intValue;
+            if (settings.parented == ExtendedEventAttribute.ParentType.Unparented) delayModeValue = (DelayModeInstantOnly)property.intValue;
+            else delayModeValue = (DelayMode)property.intValue;
 
             EditorGUI.BeginProperty(position, GUIContent.none, property);
             EditorGUI.BeginChangeCheck();
@@ -2466,7 +2518,7 @@ namespace ExtendedEvents {
             EditorGUI.EndProperty();
         }
 
-        private void DrawArgument(Rect position, SerializedProperty argument, GUIContent label, SerializedProperty callBase, ParameterCache parameterInfo, Type parameterType, bool allowDrawer, bool isEnumerable, bool drawReferenceFields, bool delayIDfield) {
+        private void DrawArgument(Rect position, SerializedProperty argument, GUIContent label, SerializedProperty callBase, ParameterCache parameterInfo, Type parameterType, bool allowDrawer, bool drawReferenceFields, bool delayIDfield) {
 
             //var displayedArgTypeName = argument.FindPropertyRelative(ArgumentDisplayTypeFieldName);
             var previewFunc = argument.FindPropertyRelative(FuncPreviewFieldName);
@@ -2505,15 +2557,12 @@ namespace ExtendedEvents {
                 }
                 if (isNegated) {
                     Rect rect = DivideRect(ref position, MarkerLabelWidth, position.width - MarkerLabelWidth, true);
-                    EditorGUIUtility.DrawColorSwatch(rect, Color.red);
+                    EditorGUIUtility.DrawColorSwatch(rect, ColorNot);
                     EditorGUI.LabelField(rect, new GUIContent("!", "Not"));
                 }
             }
 
             EditorGUIUtility.labelWidth = GetLabelWidth(position);
-
-            Type desiredType = parameterType;
-            if (isEnumerable) desiredType = MakeGenericEnumerableType(desiredType);
 
             switch (argumentType) {
                 case ArgType.Data:
@@ -2544,7 +2593,7 @@ namespace ExtendedEvents {
                             if (i > 0) dataRects[i].y = dataRects[i - 1].yMax + ElementSpacing;
                         }
 
-                        DrawMethodSelector(methodRect, argument, objectArgument.objectReferenceValue, desiredType, delayIDfield);
+                        DrawMethodSelector(methodRect, argument, objectArgument.objectReferenceValue, parameterType, delayIDfield);
 
                         if (delayIDfield) return;
 
@@ -2555,19 +2604,29 @@ namespace ExtendedEvents {
                     else {
                         Rect targetRect = DivideRect(ref position, 1, 3, true);
                         DrawEndArgument(targetRect, argument, GUIContent.none, null, typeof(object), false);
-                        DrawMethodSelector(position, argument, objectArgument.objectReferenceValue, desiredType, delayIDfield);
+                        DrawMethodSelector(position, argument, objectArgument.objectReferenceValue, parameterType, delayIDfield);
                     }
 
                     GUI.backgroundColor = backgroundColor;
                     break;
                 case ArgType.Parent:
-                    DrawIsParentField(position, label, true);
+                    DrawParentField(position, label, true);
                     break;
                 case ArgType.IDReference:
-                    DrawIDField(position, label, listenersArray, intArgument, desiredType, drawReferenceFields, true, false);
+                    if (allowDrawer) DrawIDField(position, label, listenersArray, intArgument, parameterType, drawReferenceFields, true, false);
+                    else {
+                        GUI.backgroundColor = ColorError;
+                        EditorGUI.LabelField(position, $"{argumentType} argument can't be referenced");
+                        GUI.backgroundColor = backgroundColor;
+                    }
                     break;
                 case ArgType.TagReference:
-                    DrawTagReferenceField(position, label, argument, parameterInfo, allowDrawer);
+                    if (allowDrawer) DrawTagReferenceField(position, label, argument, parameterInfo, allowDrawer);
+                    else {
+                        GUI.backgroundColor = ColorError;
+                        EditorGUI.LabelField(position, $"{argumentType} argument can't be referenced");
+                        GUI.backgroundColor = backgroundColor;
+                    }
                     break;
                 case ArgType.CustomEventArg:
                     DrawCustomEventArgsField(position, label);
@@ -2576,6 +2635,7 @@ namespace ExtendedEvents {
                     DrawUnknownArgumentTypeField(position, label);
                     break;
             }
+
             EditorGUIUtility.labelWidth = 0;
         }
 
@@ -2594,6 +2654,19 @@ namespace ExtendedEvents {
             var delayID = pListener.FindPropertyRelative(DelayIDFieldName);
 
             Rect enabledRect, tagRect, delayModeRect, methodRect, dataRect;
+
+            EventCall.Definition callSpecialFlags = (EventCall.Definition)pListener.FindPropertyRelative(CallDefinionFieldName).intValue;
+
+            if ((callSpecialFlags & EventCall.Definition.CacheReturnValue) != 0) {
+                Rect labelRect = DivideRect(ref rect, MarkerLabelWidth, rect.width - MarkerLabelWidth, true);
+                EditorGUIUtility.DrawColorSwatch(labelRect, Color.green);
+                EditorGUI.LabelField(labelRect, new GUIContent("*", "Cached"));
+            }
+            if ((callSpecialFlags & EventCall.Definition.NegateBool) != 0) {
+                Rect labelRect = DivideRect(ref rect, MarkerLabelWidth, rect.width - MarkerLabelWidth, true);
+                EditorGUIUtility.DrawColorSwatch(labelRect, ColorNot);
+                EditorGUI.LabelField(labelRect, new GUIContent("!", "Not"));
+            }
 
 
             GetRects(rect, out enabledRect, out tagRect, out delayModeRect, out methodRect, out dataRect);
@@ -2627,13 +2700,13 @@ namespace ExtendedEvents {
                 enabled.boolValue = EditorGUI.Toggle(enabledRect, enabled.boolValue);
                 EditorGUI.EndProperty();
 
-                if (!settings.parented && delayMode.intValue == 0) {
+                if (settings.parented == ExtendedEventAttribute.ParentType.Unparented && delayMode.intValue == 0) {
                     methodRect.xMin = delayModeRect.xMin;
                 }
                 else {
                     DelayMode delayModeValue = (DelayMode)delayMode.intValue;
                     if (delayModeValue > DelayMode.NoDelay) {
-                        if (!parentProperty.objectReferenceValue) GUI.backgroundColor = ColorError;
+                        if (settings.parented != ExtendedEventAttribute.ParentType.EventBuilder && !parentProperty.objectReferenceValue) GUI.backgroundColor = ColorError;
                         else if (enabled.boolValue && delayModeValue == DelayMode.Pause) GUI.backgroundColor = ColorPause;
                     }
 
@@ -2675,14 +2748,12 @@ namespace ExtendedEvents {
             GUI.backgroundColor = baseColor;
             //only allow argument if we have a valid target / method
 
-            MethodCache method = null;
-
-            method = FindMethod(pListener);
+            MethodCache method = FindMethod(pListener);
 
             Type[] parameterTypes = GetArgumentTypes(pListener, method) ?? new Type[] { typeof(object) };
             Object target = null;
             if (arguments.arraySize > 0) {
-                var arg0 = arguments.GetArrayElementAtIndex(0);
+                SerializedProperty arg0 = arguments.GetArrayElementAtIndex(0);
                 target = arg0.FindPropertyRelative(ObjectArgumentFieldName).objectReferenceValue;
             }
 
@@ -2699,8 +2770,6 @@ namespace ExtendedEvents {
                 if (i > 0) dataRects[i].y = dataRects[i - 1].yMax + ElementSpacing;
             }
 
-            int foreachIndex = GetForeachIndex(pListener, arguments);
-
             int count = Mathf.Min(arguments.arraySize, parameterTypes.Length, method?.GetParameterLabels().Length ?? arguments.arraySize);
             for (int i = 0; i < arguments.arraySize; i++) {
                 if (i >= count) {
@@ -2709,17 +2778,9 @@ namespace ExtendedEvents {
                 }
 
                 var argument = arguments.GetArrayElementAtIndex(i);
-                bool isEnumerable = foreachIndex == i;
 
                 Event evt = Event.current;
-                if (evt.type == EventType.MouseDown && evt.button == 1 && dataRects[i].Contains(evt.mousePosition)) DrawArgumentContext(pListener, i, parameterTypes[i], isEnumerable);
-
-                if (isEnumerable) {
-                    Rect foreachMarkerRect = DivideRect(ref dataRects[i], MarkerLabelWidth, dataRects[i].width - MarkerLabelWidth, true);
-                    EditorGUIUtility.DrawColorSwatch(foreachMarkerRect, Color.yellow);
-                    EditorGUI.LabelField(foreachMarkerRect, new GUIContent("f", "foreach"));
-                }
-
+                if (evt.type == EventType.MouseDown && evt.button == 1 && dataRects[i].Contains(evt.mousePosition)) DrawArgumentContext(pListener, i, parameterTypes[i], method == null);
 
                 Color backgroundColor = GUI.backgroundColor;
 
@@ -2727,7 +2788,9 @@ namespace ExtendedEvents {
                 if (method != null) parameterLabel = method.GetParameterLabels()[i];
                 else parameterLabel = GetTypeCache(parameterTypes[i]).Label;
 
-                if (i < parameterTypes.Length) DrawArgument(dataRects[i], argument, parameterLabel, pListener, method?.GetParameters(true)[i], parameterTypes[i], method != null, isEnumerable, drawReferenceField, delayIDfield);
+                if (i < parameterTypes.Length) {
+                    DrawArgument(dataRects[i], argument, parameterLabel, pListener, method?.GetParameters(true)[i], parameterTypes[i], method != null, drawReferenceField, delayIDfield);
+                }
             }
 
             GUI.backgroundColor = backgroundColorMem;
@@ -2829,7 +2892,7 @@ namespace ExtendedEvents {
         private void DrawFuncArgumentField(Rect position, SerializedProperty property, GUIContent label, ParameterCache parameterInfo, Type parameterType, bool allowDrawer, int argIndex, bool drawReferenceFields) {
 
             SerializedProperty methodDefinition = property.FindPropertyRelative(ArgumentDefitionFieldName);
-            Argument.ArgType argType = GetFuncArgType(methodDefinition.intValue, argIndex);
+            ArgType argType = GetFuncArgType(methodDefinition.intValue, argIndex);
 
             Event evt = Event.current;
             if (evt.type == EventType.MouseDown && Event.current.button == 1 && position.Contains(evt.mousePosition)) {
@@ -2838,15 +2901,24 @@ namespace ExtendedEvents {
                 int mask = (1 << (argIndex + ArgTypeFlag1)) | (1 << (argIndex + ArgTypeFlag2)) | (1 << (argIndex + ArgTypeFlag3));
 
                 context.AddItem(new GUIContent("Data"), argType == ArgType.Data, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(0, mask)));
-                context.AddSeparator("");
-                context.AddItem(new GUIContent("ID Reference"), argType == ArgType.IDReference, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag1), mask)));
-                context.AddItem(new GUIContent("Tag Reference"), argType == ArgType.TagReference, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int((1 << (argIndex + ArgTypeFlag1)) | (1 << (argIndex + ArgTypeFlag2)), mask)));
-                if (settings.parented) {
+
+                bool isDataParameter = parameterInfo != null && parameterInfo.isDataParameter;
+
+                if (!isDataParameter) {
                     context.AddSeparator("");
-                    context.AddItem(new GUIContent("Parent"), argType == ArgType.Parent, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag2), mask)));
+                    context.AddItem(new GUIContent("ID Reference"), argType == ArgType.IDReference, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag1), mask)));
+                    context.AddItem(new GUIContent("Tag Reference"), argType == ArgType.TagReference, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int((1 << (argIndex + ArgTypeFlag1)) | (1 << (argIndex + ArgTypeFlag2)), mask)));
+                    if (settings.parented != ExtendedEventAttribute.ParentType.Unparented) {
+                        context.AddSeparator("");
+                        context.AddItem(new GUIContent("Parent"), argType == ArgType.Parent, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag2), mask)));
+                    }
+                    context.AddSeparator("");
+                    context.AddItem(new GUIContent("Custom Event Args"), argType == ArgType.CustomEventArg, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag3), mask)));
                 }
-                context.AddSeparator("");
-                context.AddItem(new GUIContent("Custom Event Args"), argType == ArgType.CustomEventArg, SetFuncArgumentType, new PropertyValue<Vector2Int>(methodDefinition, new Vector2Int(1 << (argIndex + ArgTypeFlag3), mask)));
+                else if (argType != ArgType.Data) {
+                    context.AddSeparator("");
+                    context.AddDisabledItem(new GUIContent(argType.ToString()), true);
+                }
                 context.ShowAsContext();
             }
 
@@ -2862,7 +2934,7 @@ namespace ExtendedEvents {
                     else DrawEndArgument(position, property, label, parameterInfo, parameterType, allowDrawer);
                     break;
                 case ArgType.Parent:
-                    DrawIsParentField(position, label, true);
+                    DrawParentField(position, label, true);
                     break;
                 case ArgType.IDReference:
                     DrawIDField(position, label, listenersArray, property.FindPropertyRelative(IntArgumentFieldName), parameterType, drawReferenceFields, true, false);
@@ -2948,24 +3020,42 @@ namespace ExtendedEvents {
                 buttonRect = DivideRect(ref position, position.width - GetLabelWidth(position), GetLabelWidth(position));
                 buttonRect.height = EditorGUIUtility.singleLineHeight;
 
+                //draw call
                 if (referencedArgument == null) {
                     DrawLabel(ref position, label);
                     DrawCall(position, dataAddress.x, false, false, desiredType, delayIDfield);
                 }
+                //draw argument
                 else {
-                    ParameterCache parameter;
-                    Type type;
-                    MethodCache callMethod = FindMethod(referencedCall);
-                    if (callMethod != null) {
-                        parameter = callMethod.GetParameters(true)[dataAddress.y];
-                        type = callMethod.GetParameterTypes(true)[dataAddress.y].type;
+                    SerializedProperty propertyFlag = referencedArgument.FindPropertyRelative(ArgumentDefitionFieldName);
+                    ArgType argumentType = GetArgType((Argument.Definition)propertyFlag.intValue);
+                    switch (argumentType) {
+                        case ArgType.Data:
+                        case ArgType.Method:
+                            ParameterCache parameter;
+                            Type type;
+                            MethodCache callMethod = FindMethod(referencedCall);
+                            if (callMethod != null) {
+                                parameter = callMethod.GetParameters(true)[dataAddress.y];
+                                type = callMethod.GetParameterTypes(true)[dataAddress.y].type;
+                            }
+                            else {
+                                parameter = null;
+                                type = ExtendedEvent.GetType(referencedCall.FindPropertyRelative(MethodNameFieldName).stringValue);
+                            }
+                            if (type != null) DrawArgument(position, referencedArgument, label, referencedCall, parameter, type, true, false, delayIDfield);
+                            else EditorGUI.LabelField(position, "Method missing");
+                            break;
+                        default:
+                        case ArgType.IDReference:
+                        case ArgType.TagReference:
+                        case ArgType.Parent:
+                        case ArgType.CustomEventArg:
+                            GUI.backgroundColor = ColorError;
+                            EditorGUI.LabelField(position, $"{argumentType} argument can't be referenced");
+                            GUI.backgroundColor = backgroundColor;
+                            break;
                     }
-                    else {
-                        parameter = null;
-                        type = ExtendedEvent.GetType(referencedCall.FindPropertyRelative(MethodNameFieldName).stringValue);
-                    }
-                    if (type != null) DrawArgument(position, referencedArgument, label, referencedCall, parameter, type, true, GetForeachIndex(referencedCall, referencedCall.FindPropertyRelative(ArgumentsFieldName)) == dataAddress.y, false, delayIDfield);
-                    else EditorGUI.LabelField(position, "Method missing");
                 }
 
             }
@@ -2983,11 +3073,11 @@ namespace ExtendedEvents {
 
         }
 
-        private void DrawIsParentField(Rect position, GUIContent label, bool disabled) {
+        private void DrawParentField(Rect position, GUIContent label, bool disabled) {
             EditorGUIUtility.labelWidth = GetLabelWidth(position);
             DrawLabel(ref position, label);
             Color backgroundColor = GUI.backgroundColor;
-            if (!parentProperty.objectReferenceValue) {
+            if (settings.parented != ExtendedEventAttribute.ParentType.EventBuilder && !parentProperty.objectReferenceValue) {
                 GUI.backgroundColor = ColorError;
             }
             if (disabled) EditorGUI.BeginDisabledGroup(true);
@@ -3003,17 +3093,18 @@ namespace ExtendedEvents {
         }
 
         private void DrawMethodSelector(Rect propertyRect, SerializedProperty property, Object target, Type desiredType, bool simplified) {
+            bool propertyIsArgument = PropertyIsArgument(property);
 
             if (EditorGUI.showMixedValue) {
                 GUI.Button(propertyRect, new GUIContent("Editing multiple methods is not supported"), EditorStyles.miniButton);
                 return;
             }
 
-            SerializedProperty methodSignature = property.FindPropertyRelative(PropertyIsArgument(property) ? StringArgumentFieldName : MethodNameFieldName);
+            SerializedProperty methodSignature = property.FindPropertyRelative(propertyIsArgument ? StringArgumentFieldName : MethodNameFieldName);
 
             EditorGUI.BeginProperty(propertyRect, GUIContent.none, methodSignature);
 
-            MethodCache method = FindMethod(ExtendedEvent.FindMethod(methodSignature.stringValue));
+            MethodCache method = FindMethod(methodSignature.stringValue);
 
             Type reflectedType;
             string reflectedTypeName;
@@ -3030,8 +3121,8 @@ namespace ExtendedEvents {
                 var colorizer = method.GetCustomAttribute<ColorizeMethodAttribute>();
 
                 if (colorizer != null) methodColor = colorizer.color;
-                else if (method.ReturnType.type == typeof(IEnumerator)) {
-                    if (!parentProperty.objectReferenceValue) methodColor = ColorError;
+                else if (!propertyIsArgument && desiredType == null && method.ReturnType.type == typeof(IEnumerator)) {
+                    if (settings.parented != ExtendedEventAttribute.ParentType.EventBuilder && !parentProperty.objectReferenceValue) methodColor = ColorError;
                     else methodColor = ColorCoroutine;
                 }
                 else methodColor = backgroundColor;
@@ -3043,13 +3134,21 @@ namespace ExtendedEvents {
                     methodButtonContent = new GUIContent($"INVALID {methodButtonContent.text}", $"Method {method.DisplayName} contains ref or out parameters");
                     methodColor = ColorError;
                 }
-                else if(method.GetCustomAttribute<ObsoleteAttribute>() != null) {
+                else if (method.GetCustomAttribute<ObsoleteAttribute>() != null) {
                     methodButtonContent = new GUIContent($"[OBSOLETE] {methodButtonContent.text}", $"[OBSOLETE] {methodButtonContent.tooltip}");
                     methodColor = ColorError;
                 }
-                else if (desiredType != null && !desiredType.IsCastableFrom(method.ReturnType.type, true)) {
-                    methodButtonContent = new GUIContent(method.Label.text, $"Return type {method.ReturnType.DisplayName} of method {method.Name} can't be cast to paramter type {GetDisplayTypeName(desiredType)}");
-                    methodColor = ColorError;
+                else if (desiredType != null) {
+                    Type cachedDataType = CachedData.GetCachedDataType(methodSignature.stringValue);
+
+                    if (cachedDataType != null && !desiredType.IsCastableFrom(method.ReturnType.type, false) && desiredType.IsCastableFrom(cachedDataType, false)) {
+                        methodButtonContent = new GUIContent(method.Label.text, $"{GetDisplayTypeName(cachedDataType)} as {GetDisplayTypeName(desiredType)}");
+                        methodColor = Color.cyan;
+                    }
+                    else if (!desiredType.IsCastableFrom(method.ReturnType.type, true)) {
+                        methodButtonContent = new GUIContent(method.Label.text, $"Return type {method.ReturnType.DisplayName} of method {method.Name} can't be cast to paramter type {GetDisplayTypeName(desiredType)}");
+                        methodColor = ColorError;
+                    }
                 }
 
             }
@@ -3102,8 +3201,8 @@ namespace ExtendedEvents {
                 if (EditorGUI.EndChangeCheck()) {
                     MethodInfo newMethod = ExtendedEvent.FindMethod(newMethodName);
                     if (newMethod != null) {
-                        if (!PropertyIsArgument(property)) new ExtendedEventFunction(property, target, newMethod).Assign();
-                        else new FuncPopupDrawer.GetArgFunction(property, target, newMethod).Assign();
+                        if (!propertyIsArgument) new CallMethodMap(property, target, newMethod).Assign();
+                        else new ArgumentMethodMap(property, target, newMethod).Assign();
 
                         ExposedMethodSignaturePath = null;
                     }
@@ -3136,7 +3235,7 @@ namespace ExtendedEvents {
 
         private void DrawTagReferenceField(Rect position, GUIContent label, SerializedProperty property, ParameterCache parameterInfo, bool allowDrawer) {
             GUI.Box(position, GUIContent.none);
-            DrawEndArgument(position, property, label, parameterInfo, _TagType, allowDrawer);
+            DrawEndArgument(position, property, label, null, _TagType, allowDrawer);
         }
 
         private void DrawUnknownArgumentTypeField(Rect position, GUIContent label) {
@@ -3156,6 +3255,11 @@ namespace ExtendedEvents {
             if (!ShowNonPublicMethods) bindingFlags &= ~BindingFlags.NonPublic;
             List<MethodInfo> instanceMethods = new List<MethodInfo>();
             instanceMethods = targetType.GetMethods(bindingFlags).ToList();
+            if (targetType.IsInterface) {
+                foreach (Type interfaceType in GetTypes(targetType)) {
+                    instanceMethods.AddRange(interfaceType.GetMethods(bindingFlags));
+                }
+            }
             instanceMethods.RemoveAll(m => m.GetParameters().Length > MaxArgs - 1);
 
             //componentMethods.RemoveAll(m => CheckHidden(m, staticOnly));
@@ -3169,19 +3273,11 @@ namespace ExtendedEvents {
             while (baseType != null);
 
             staticMethods.RemoveAll(m => m.GetParameters().Length > MaxArgs);
-            if (target) {
-                staticMethods.RemoveAll(m => m.GetParameters().Length == 0);
-                staticMethods.RemoveAll(m => !m.ContainsGenericParameters && !m.GetParameters()[0].ParameterType.IsCastableFrom(targetType, true));
-            }
 
             List<MethodInfo> allMethods = new List<MethodInfo>(instanceMethods.Union(staticMethods));
             allMethods.RemoveAll(m => m.GetCustomAttribute<ObsoleteAttribute>() != null);
             allMethods.RemoveAll(m => m.GetCustomAttribute<HiddenAttribute>() != null);
             allMethods.RemoveAll(m => m.GetParameters().FirstOrDefault(p => p.ParameterType.IsByRef || p.ParameterType.IsPointer) != null);
-
-            if (PropertyIsArgument(listener)) {
-                allMethods.RemoveAll(m => m.ReturnType == typeof(void));
-            }
 
             if (desiredMethodName != null) {
                 allMethods.RemoveAll(m => !m.Name.StartsWith(desiredMethodName));
@@ -3192,7 +3288,7 @@ namespace ExtendedEvents {
             //check if there is a suggested method to replace this Obsolete method
             ObsoleteAttribute obsoleteAttribute = currentMethod?.GetCustomAttribute<ObsoleteAttribute>();
             if (obsoleteAttribute != null && !string.IsNullOrEmpty(obsoleteAttribute.Message)) {
-                MethodCache suggestedMethod = FindMethod(ExtendedEvent.FindMethod(obsoleteAttribute.Message));
+                MethodCache suggestedMethod = FindMethod(obsoleteAttribute.Message);
                 if (suggestedMethod != null) {
                     var vmm = new ValidMethodMap();
                     vmm.target = target;
@@ -3368,44 +3464,6 @@ namespace ExtendedEvents {
             return TagToString(selectedElement);
         }
 
-        private void ObjectField(Rect position, SerializedProperty property) {
-            Object objectRef = property.objectReferenceValue;
-            if (!objectRef || !(objectRef is Component)) {
-                EditorGUI.ObjectField(position, property, GUIContent.none);
-            }
-            else {
-                EditorGUI.BeginChangeCheck();
-                Object newObject = EditorGUI.ObjectField(position, objectRef, typeof(Object), true);
-                if (EditorGUI.EndChangeCheck()) {
-                    if (newObject is GameObject go) {
-                        Component[] components = go.GetComponents<Component>();
-                        //perfect match
-                        foreach (var component in components) {
-                            if (component.GetType() == objectRef.GetType()) {
-                                property.objectReferenceValue = component;
-                                return;
-                            }
-                        }
-                        //match
-                        foreach (var component in components) {
-                            if (objectRef.GetType().IsAssignableFrom(component.GetType())) {
-                                property.objectReferenceValue = component;
-                                return;
-                            }
-                        }
-                        //last resort
-                        foreach (var component in components) {
-                            if (component.GetType().IsAssignableFrom(objectRef.GetType())) {
-                                property.objectReferenceValue = component;
-                                return;
-                            }
-                        }
-                    }
-                    property.objectReferenceValue = newObject;
-                }
-            }
-        }
-
         private void RemoveButton(ReorderableList list) {
             ReorderableList.defaultBehaviours.DoRemoveButton(list);
             lastSelectedIndex = list.index;
@@ -3454,6 +3512,7 @@ namespace ExtendedEvents {
             FixNameWindowActive = !FixNameWindowActive;
         }
         */
+
         struct ValidMethodMap {
             #region Fields
 
@@ -3466,7 +3525,7 @@ namespace ExtendedEvents {
             #endregion
         }
 
-        public struct ExtendedEventFunction {
+        public struct CallMethodMap {
             #region Fields
 
             private readonly SerializedProperty listener;
@@ -3477,7 +3536,7 @@ namespace ExtendedEvents {
 
             #endregion
 
-            public ExtendedEventFunction(SerializedProperty listener, Object target, MethodInfo method) {
+            public CallMethodMap(SerializedProperty listener, Object target, MethodInfo method) {
                 this.listener = listener;
                 this.target = target;
                 this.method = method;
@@ -3485,42 +3544,22 @@ namespace ExtendedEvents {
 
             public void Assign() {
                 // find the current event target...
-                var methodName = listener.FindPropertyRelative(MethodNameFieldName);
-
+                SerializedProperty methodName = listener.FindPropertyRelative(MethodNameFieldName);
                 methodName.stringValue = GetSerializableMethodName(method);
 
-                ParameterInfo[] argParams;
-                if (!method.IsStatic) {
-                    List<ParameterInfo> argParamList = new List<ParameterInfo>();
-                    argParamList.Add(null);
-                    argParamList.AddRange(method.GetParameters());
-                    argParams = argParamList.ToArray();
-                }
-                else {
-                    argParams = method.GetParameters();
-                }
-                var argumentArray = listener.FindPropertyRelative(ArgumentsFieldName);
-                argumentArray.arraySize = argParams.Length;
+                SerializedProperty argumentArray = listener.FindPropertyRelative(ArgumentsFieldName);
 
-                for (int i = 0; i < argumentArray.arraySize; i++) {
-                    var argument = argumentArray.GetArrayElementAtIndex(i);
-                    ParameterInfo parameter = argParams[i];
-                    Type parameterType = parameter?.ParameterType ?? method.ReflectedType;
+                MethodCache methodCache = FindMethod(GetSerializableMethodName(method));
+                TypeCache[] methodParameterTypes = methodCache.GetParameterTypes(true);
 
-                    ParameterTypeEnum parameterTypeEnum = GetParameterType(method, i);
+                argumentArray.arraySize = methodParameterTypes.Length;
 
-                    //argument.FindPropertyRelative(ParameterTypeFlagsFieldName).intValue = (int)parameterTypeEnum;
-
-                    var argTypeEnum = GetTypeEnum(parameterType);
-                    switch (argTypeEnum) {
-                        case TypeEnum.Object:
-                            var objectArgument = argument.FindPropertyRelative(ObjectArgumentFieldName);
-                            bool isMethod = ((Argument.Definition)argument.FindPropertyRelative(ArgumentDefitionFieldName).intValue & Argument.Definition.IsMethod) != 0;
-                            if (objectArgument.objectReferenceValue && !isMethod) {
-                                if (parameterType.IsInstanceOfType(objectArgument)) break;
-                                if (parameterType.IsInstanceOfType(target)) objectArgument.objectReferenceValue = target;
-                            }
-                            break;
+                if (target && methodParameterTypes.Length > 0) {
+                    SerializedProperty argument0 = argumentArray.GetArrayElementAtIndex(0);
+                    ArgType arg0Type = GetArgType((Argument.Definition)argument0.FindPropertyRelative(ArgumentDefitionFieldName).intValue);
+                    if (methodParameterTypes[0].type.IsCastableFrom(target.GetType()) && arg0Type == ArgType.Data) {
+                        SerializedProperty objectArgument = argument0.FindPropertyRelative(ObjectArgumentFieldName);
+                        objectArgument.objectReferenceValue = target;
                     }
                 }
 
@@ -3539,9 +3578,68 @@ namespace ExtendedEvents {
                 var arguments = listener.FindPropertyRelative(ArgumentsFieldName);
                 arguments.arraySize = 1;
                 //arguments.GetArrayElementAtIndex(0).FindPropertyRelative(ParameterTypeFieldName).stringValue = GetSerializableTypeName(typeof(object));
-                arguments.GetArrayElementAtIndex(0).FindPropertyRelative(ArgumentDefitionFieldName).boolValue = false;
+                arguments.GetArrayElementAtIndex(0).FindPropertyRelative(ArgumentDefitionFieldName).intValue = 0;
+
+                var definition = listener.FindPropertyRelative(CallDefinionFieldName);
+                definition.intValue = 0;
 
                 listener.serializedObject.ApplyModifiedProperties();
+            }
+        }
+
+
+        public struct ArgumentMethodMap {
+            #region Fields
+
+            private readonly SerializedProperty argument;
+
+            private readonly Object target;
+
+            private readonly MethodInfo method;
+
+            #endregion
+
+            public ArgumentMethodMap(SerializedProperty argument, Object target, MethodInfo method) {
+                this.argument = argument;
+                this.target = target;
+                this.method = method;
+            }
+
+            public void Assign() {
+                // find the current event target...
+                SerializedProperty listenerTarget = argument.FindPropertyRelative(ObjectArgumentFieldName);
+                SerializedProperty stringArgument = argument.FindPropertyRelative(StringArgumentFieldName);
+                SerializedProperty methodDefinition = argument.FindPropertyRelative(ArgumentDefitionFieldName);
+
+                //var argTypeProperty = argument.FindPropertyRelative(MethodDefitionFieldName);
+
+                MethodCache methodCache = FindMethod(GetSerializableMethodName(method));
+                ArgType arg0Type = GetFuncArgType(methodDefinition.intValue, 0);
+
+                if (methodCache.GetParameters(true).Length > 0 && arg0Type == ArgType.Data) {
+                    listenerTarget.objectReferenceValue = target;
+                }
+
+                stringArgument.stringValue = GetSerializableMethodName(method);
+
+                var previewAttribute = method.GetCustomAttribute<FuncPreviewAttribute>();
+                argument.FindPropertyRelative(FuncPreviewFieldName).boolValue = previewAttribute != null;
+
+                argument.serializedObject.ApplyModifiedProperties();
+            }
+
+            public void Clear() {
+                // find the current event target...
+                var methodName = argument.FindPropertyRelative(StringArgumentFieldName);
+                methodName.stringValue = null;
+
+                var methodIsStatic = argument.FindPropertyRelative(BoolArgumentFieldName);
+                methodIsStatic.boolValue = false;
+
+                //var objectArgument = argument.FindPropertyRelative(ObjectArgumentFieldName);
+                //objectArgument.objectReferenceValue = null;
+
+                argument.serializedObject.ApplyModifiedProperties();
             }
         }
 
@@ -3573,17 +3671,12 @@ namespace ExtendedEvents {
                     case ArgumentOperation.MakeCachedArgument:
                         ToggleFlag(argument, Argument.Definition.CacheReturnValue);
                         break;
-                    case ArgumentOperation.SetEnumerator:
-                        bool isCached = (argumentSpecialFlags.intValue & (1 << index)) != 0;
-                        argumentSpecialFlags.intValue &= ~(int)EventCall.Definition.ArgIsEnumeratorAll;
-                        if (!isCached) argumentSpecialFlags.intValue |= 1 << index;
-                        break;
                     case ArgumentOperation.ToggleModifyFlag:
                         ToggleFlag(argument, Argument.Definition.NegateBool);
                         break;
-                    case ArgumentOperation.PasteEventID:
-                        var refPasteID = argument.FindPropertyRelative(IntArgumentFieldName);
-                        refPasteID.intValue = CopiedEvents[0].id;
+                    case ArgumentOperation.PasteID:
+                        SerializedProperty refPasteID = argument.FindPropertyRelative(IntArgumentFieldName);
+                        refPasteID.intValue = int.Parse(EditorGUIUtility.systemCopyBuffer);
                         break;
                     case ArgumentOperation.Copy:
                         CopiedArgument = new ArgumentMap(argument);
@@ -3596,7 +3689,10 @@ namespace ExtendedEvents {
                         break;
                     case ArgumentOperation.CopyParameterType:
                         MethodCache method = FindMethod(call);
+                        TypeCache typeCache = null;
+                        if (method == null) typeCache = GetTypeCache(ExtendedEvent.GetType(call.FindPropertyRelative(MethodNameFieldName).stringValue));
                         if (method != null) EditorGUIUtility.systemCopyBuffer = method.GetParameterTypes(true)[index].SerializableTypeName;
+                        if (typeCache != null) EditorGUIUtility.systemCopyBuffer = typeCache.SerializableTypeName;
                         break;
                     case ArgumentOperation.CopyArgumentType:
                         MethodCache func = FindArgumentFunc(argument);
@@ -3648,9 +3744,12 @@ namespace ExtendedEvents {
             }
 
             public void Execute() {
+                SerializedProperty call = null;
+                if (listenersArray.arraySize > elementIndex) call = listenersArray.GetArrayElementAtIndex(elementIndex);
+                SerializedProperty definition = call?.FindPropertyRelative(CallDefinionFieldName);
                 switch (contextOperation) {
                     case ContextOperation.Dublicate:
-                        var temp = new CallMap(listenersArray.GetArrayElementAtIndex(elementIndex));
+                        var temp = new CallMap(call);
                         listenersArray.InsertArrayElementAtIndex(elementIndex + 1);
                         //when we dublicate event we always generate a fresh new id
                         temp.PasteValues(listenersArray.GetArrayElementAtIndex(elementIndex + 1), GenerateID(listenersArray));
@@ -3666,21 +3765,29 @@ namespace ExtendedEvents {
                     case ContextOperation.PasteOne:
                         bool wasEmpty = listenersArray.arraySize == 0;
                         //when we paste one event, we use copied id if array was empty, otherwise we keep old id
-                        int newID = wasEmpty ? GenerateID(listenersArray) : listenersArray.GetArrayElementAtIndex(elementIndex).FindPropertyRelative(IDFieldName).intValue;
+                        int newID = wasEmpty ? GenerateID(listenersArray) : call.FindPropertyRelative(IDFieldName).intValue;
                         if (wasEmpty) listenersArray.arraySize += 1;
-                        CopiedEvents[0].PasteValues(listenersArray.GetArrayElementAtIndex(elementIndex), newID);
+                        CopiedEvents[0].PasteValues(call, newID);
                         break;
                     case ContextOperation.DeleteOne:
                         listenersArray.DeleteArrayElementAtIndex(elementIndex);
                         break;
                     case ContextOperation.CopyID:
-                        EditorGUIUtility.systemCopyBuffer = listenersArray.GetArrayElementAtIndex(elementIndex).FindPropertyRelative(IDFieldName).intValue.ToString();
+                        EditorGUIUtility.systemCopyBuffer = call.FindPropertyRelative(IDFieldName).intValue.ToString();
                         break;
                     case ContextOperation.PasteID:
-                        listenersArray.GetArrayElementAtIndex(elementIndex).FindPropertyRelative(IDFieldName).intValue = int.Parse(EditorGUIUtility.systemCopyBuffer);
+                        call.FindPropertyRelative(IDFieldName).intValue = int.Parse(EditorGUIUtility.systemCopyBuffer);
                         break;
                     case ContextOperation.RandomizeID:
-                        listenersArray.GetArrayElementAtIndex(elementIndex).FindPropertyRelative(IDFieldName).intValue = GenerateID(listenersArray);
+                        call.FindPropertyRelative(IDFieldName).intValue = GenerateID(listenersArray);
+                        break;
+                    case ContextOperation.ToggleModifyFlag:
+                        if ((definition.intValue & (int)EventCall.Definition.NegateBool) != 0) definition.intValue &= ~(int)EventCall.Definition.NegateBool;
+                        else definition.intValue |= (int)EventCall.Definition.NegateBool;
+                        break;
+                    case ContextOperation.MakeCachedCall:
+                        if ((definition.intValue & (int)EventCall.Definition.CacheReturnValue) != 0) definition.intValue &= ~(int)EventCall.Definition.CacheReturnValue;
+                        else definition.intValue |= (int)EventCall.Definition.CacheReturnValue;
                         break;
                 }
                 listenersArray.serializedObject.ApplyModifiedProperties();
@@ -3783,6 +3890,8 @@ namespace ExtendedEvents {
             public TypeCache ParameterType { get; }
 
             public T GetCustomAttribute<T>() where T : Attribute => attributes.FirstOrDefault(a => a is T) as T;
+
+            public bool isDataParameter { get; set; }
         }
 
         public class PropertyValue<T> {
@@ -3842,15 +3951,27 @@ namespace ExtendedEvents {
 
         public class GenericPropertyMap {
             private object value;
-            private Dictionary<string, object> values = new Dictionary<string, object>();
+            private List<SerializedValue> values = new List<SerializedValue>();
+
+            private class SerializedValue {
+                public SerializedValue(string relativePath, object value) {
+                    this.relativePath = relativePath;
+                    this.value = value;
+                }
+                public string relativePath;
+                public object value;
+            }
 
             public GenericPropertyMap(SerializedProperty from) {
+                if (from == null) return;
                 value = GetValue(from);
-                if (value != null) {
+                if (from.propertyType != SerializedPropertyType.Generic) {
                     return;
                 }
+                int baseCount = from.propertyPath.Length + 1;
+
                 foreach (var p in GetProperties(from)) {
-                    values.TryAdd(p.name, GetValue(p));
+                    values.Add(new SerializedValue(p.propertyPath.Substring(baseCount, p.propertyPath.Length - baseCount), GetValue(p)));
                 }
             }
             private static IEnumerable<SerializedProperty> GetProperties(SerializedProperty property) {
@@ -3863,14 +3984,13 @@ namespace ExtendedEvents {
             }
 
             public void PasteValues(SerializedProperty to) {
-                if (value != null || values.Count == 0) {
+                if (to.propertyType != SerializedPropertyType.Generic || values.Count == 0) {
                     SetValue(to, value);
                     return;
                 }
-                foreach (var p in GetProperties(to)) {
-                    if (values.TryGetValue(p.name, out object value)) {
-                        SetValue(p, value);
-                    }
+                foreach (var v in values) {
+                    SerializedProperty p = to.FindPropertyRelative(v.relativePath);
+                    if (p != null) SetValue(p, v.value);
                 }
             }
         }
@@ -3973,81 +4093,33 @@ namespace ExtendedEvents {
             #endregion
         }
 
-        private class FuncPopupDrawer {
-            public static void ClearArgFunction(object source) {
-                ((GetArgFunction)source).Clear();
-            }
-
-            public static void SetArgFunction(object source) {
-                ((GetArgFunction)source).Assign();
-            }
-
-            public struct GetArgFunction {
-                #region Fields
-
-                private readonly SerializedProperty argument;
-
-                private readonly Object target;
-
-                private readonly MethodInfo method;
-
-                #endregion
-
-                public GetArgFunction(SerializedProperty argument, Object target, MethodInfo method) {
-                    this.argument = argument;
-                    this.target = target;
-                    this.method = method;
-                }
-
-                public void Assign() {
-                    // find the current event target...
-                    var listenerTarget = argument.FindPropertyRelative(ObjectArgumentFieldName);
-                    var stringArgument = argument.FindPropertyRelative(StringArgumentFieldName);
-                    //var argTypeProperty = argument.FindPropertyRelative(MethodDefitionFieldName);
-
-                    listenerTarget.objectReferenceValue = target;
-                    stringArgument.stringValue = GetSerializableMethodName(method);
-
-                    var previewAttribute = method.GetCustomAttribute<FuncPreviewAttribute>();
-                    argument.FindPropertyRelative(FuncPreviewFieldName).boolValue = previewAttribute != null;
-
-                    argument.serializedObject.ApplyModifiedProperties();
-                }
-
-                public void Clear() {
-                    // find the current event target...
-                    var methodName = argument.FindPropertyRelative(StringArgumentFieldName);
-                    methodName.stringValue = null;
-
-                    var methodIsStatic = argument.FindPropertyRelative(BoolArgumentFieldName);
-                    methodIsStatic.boolValue = false;
-
-                    //var objectArgument = argument.FindPropertyRelative(ObjectArgumentFieldName);
-                    //objectArgument.objectReferenceValue = null;
-
-                    argument.serializedObject.ApplyModifiedProperties();
-                }
-            }
+        public static void ClearArgFunction(object source) {
+            ((ArgumentMethodMap)source).Clear();
         }
+
+        public static void SetArgFunction(object source) {
+            ((ArgumentMethodMap)source).Assign();
+        }
+
 
         private class MethodCache {
             #region Fields
 
-            private readonly ParameterCache[] parameters;
+            private ParameterCache[] parameters;
 
-            private readonly ParameterCache[] argumentParameters;
+            private ParameterCache[] argumentParameters;
 
-            private readonly TypeCache[] parameterTypes;
+            private TypeCache[] parameterTypes;
 
-            private readonly TypeCache[] argumentParameterTypes;
+            private TypeCache[] argumentParameterTypes;
 
-            private readonly GUIContent[] parameterLabels;
+            private GUIContent[] parameterLabels;
 
-            private readonly Attribute[] attributes;
+            private Attribute[] attributes;
 
             #endregion
 
-            public MethodCache(MethodInfo method) {
+            private void Setup(MethodInfo method) {
                 this.method = method;
                 IsStatic = method.IsStatic;
 
@@ -4058,8 +4130,6 @@ namespace ExtendedEvents {
                 ReflectedType = GetTypeCache(method.ReflectedType);
 
                 ReturnType = GetTypeCache(method.ReturnType);
-                IsGenericMethod = method.IsGenericMethod;
-                genericArguments = method.GetGenericArguments();
 
                 Name = method.Name;
                 Label = new GUIContent(GetSimpleMethodName(method), GetDisplayMethodName(method));
@@ -4083,38 +4153,58 @@ namespace ExtendedEvents {
 
                 parameterLabels = argumentParameters.Select(p => p?.Label ?? GetTypeCache(method.ReflectedType).Label).ToArray();
 
-                foreach (var type in parameterTypes) {
-                    if (type.type.IsByRef || type.type.IsPointer) {
+                foreach (var t in parameterTypes) {
+                    if (t.type.IsByRef || t.type.IsPointer) {
                         containsReferenceParameters = true;
                         break;
                     }
                 }
             }
 
-            public string DisplayName { get; }
 
-            public bool IsGenericMethod { get; }
-
-            public bool IsStatic { get; }
-
-            public GUIContent Label { get; }
-
-            public MethodInfo method { get; }
-
-            public string Name { get; }
-
-            public TypeCache ReflectedType { get; }
-
-            public TypeCache ReturnType { get; }
-
-            public bool containsReferenceParameters { get; }
+            private static T GetValue<T>(T value) {
+                return value;
+            }
 
 
-            private Type[] genericArguments { get; }
+            public MethodCache(Type type) {
+                MethodInfo method = ((Func<object, object>)GetValue).Method.GetGenericMethodDefinition().MakeGenericMethod(type);
+                Setup(method);
+
+                parameters[0].isDataParameter = true;
+
+                //parameters[0] = null;
+                //argumentParameters[0] = null;
+                //parameterLabels[0] = GetTypeCache(type).Label;
+
+                ReflectedType = GetTypeCache(type);
+                Name = type.Name;
+                Label = new GUIContent(type.Name, GetDisplayTypeName(type));
+                DisplayName = GetDisplayTypeName(type);
+
+            }
+
+            public MethodCache(MethodInfo method) {
+                Setup(method);
+            }
+
+            public string DisplayName { get; private set; }
+
+            public bool IsStatic { get; private set; }
+
+            public GUIContent Label { get; private set; }
+
+            public MethodInfo method { get; private set; }
+
+            public string Name { get; private set; }
+
+            public TypeCache ReflectedType { get; private set; }
+
+            public TypeCache ReturnType { get; private set; }
+
+            public bool containsReferenceParameters { get; private set; }
 
             public T GetCustomAttribute<T>() where T : Attribute => attributes.FirstOrDefault(a => a is T) as T;
-
-            public Type[] GetGenericArguments() => genericArguments;
 
             public GUIContent[] GetParameterLabels() => parameterLabels;
 

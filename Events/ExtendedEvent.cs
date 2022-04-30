@@ -164,10 +164,24 @@ namespace ExtendedEvents {
 
             bool methodIsGeneric = genericCount > 0;
 
+            Type type;
+            try {
+                type = Type.GetType(data[0], true);
+            }
+            catch {
+                return null;
+            }
+
             Type[] parameterTypes = new Type[parameterCount];
 
             for (int i = 0; i < parameterCount; i++) {
-                Type parameterType = Type.GetType(data[i + 2]);
+                Type parameterType;
+                try {
+                    parameterType = Type.GetType(data[i + 2], true);
+                }
+                catch {
+                    return null;
+                }
 
                 if (!methodIsGeneric) {
                     parameterTypes[i] = parameterType;
@@ -205,7 +219,7 @@ namespace ExtendedEvents {
                 }
             }
 
-            mi = FindMethod(Type.GetType(data[0]), data[1], parameterTypes, methodIsGeneric);
+            mi = FindMethod(type, data[1], parameterTypes, methodIsGeneric);
 
             //if method is generic then we need to make a specific method from it's generic definition
             if (methodIsGeneric) {
@@ -245,14 +259,38 @@ namespace ExtendedEvents {
         }
 
         private static MethodInfo FindMethod(Type type, string name, Type[] types, bool methodIsGeneric) {
-
             MethodInfo method = null;
             Type baseType = type;
             do {
                 BindingFlags bindingFlags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
                 try {
                     if (!methodIsGeneric) {
-                        method = baseType.GetMethod(name, bindingFlags, null, types, null);
+                        try {
+                            method = baseType.GetMethod(name, bindingFlags, null, types, null);
+                        }
+                        catch (AmbiguousMatchException) {
+                            MethodInfo[] methods = baseType.GetMethods(bindingFlags);
+                            for (int i = 0; i < methods.Length; i++) {
+                                var m = methods[i];
+                                if (m.Name != name) continue;
+                                if (m.IsGenericMethod) continue;
+                                ParameterInfo[] parameters = m.GetParameters();
+                                if (parameters.Length != types.Length) continue;
+                                bool parametersMatch = true;
+                                for (int j = 0; j < parameters.Length; j++) {
+                                    Type expectedParameter = types[j];
+                                    Type actualParameter = parameters[j].ParameterType;
+                                    //if paramter is not generic we only check if types match
+                                    if (actualParameter == expectedParameter) continue;
+                                    parametersMatch = false;
+                                    break;
+                                }
+                                if (parametersMatch) {
+                                    method = m;
+                                    break;
+                                }
+                            }
+                        }
                     }
                     else {
                         MethodInfo[] methods = baseType.GetMethods(bindingFlags);
@@ -326,6 +364,7 @@ namespace ExtendedEvents {
             if (data != null) return data.Invoke;
             return null;
         }
+
         public Action<TArg> GetDelegate<TArg>(int id) {
             var data = GetData(id);
             if (data != null) return data.Invoke<TArg>;
@@ -359,7 +398,7 @@ namespace ExtendedEvents {
             for (int i = 0; i < count; i++) {
                 CachedData call = calls[start + i];
 
-                float delay = call.GetPauseDuration();
+                float delay = call.GetPauseDuration(eventArg);
                 if (delay > 0) {
                     if (Time.inFixedTimeStep) {
                         float targetTime = Time.time + delay;
@@ -378,7 +417,7 @@ namespace ExtendedEvents {
 
         protected abstract void Setup();
 
-        protected class DelayedInvokerInternal : InvokerInternal {
+        protected class DelayedInvokerInternal : InvokerInternal, ICoroutineStarter {
             #region Fields
 
             private readonly ExtendedEvent events;
@@ -401,7 +440,7 @@ namespace ExtendedEvents {
             }
         }
 
-        protected class DelayedInvokerInternal<TArg> : InvokerInternal<TArg> {
+        protected class DelayedInvokerInternal<TArg> : InvokerInternal<TArg>, ICoroutineStarter {
             #region Fields
 
             private readonly ExtendedEvent events;
@@ -492,7 +531,7 @@ namespace ExtendedEvents {
             public override IEnumerable<T> GetValues<T>(TArg eventArg) {
                 for (int i = range.start; i < range.end; i++) {
                     CachedData call = calls[i];
-                    yield return call.GetValue<T, TArg>(eventArg);
+                    yield return call.GetValue<TArg, T>(eventArg);
                 }
             }
 
@@ -566,10 +605,16 @@ namespace ExtendedEvents {
         public void Add<TArg>(TTag tag, Action<TArg> del) => GetInvoker<TArg>(tag).del += del;
 
         public IEnumerable<CachedData> GetCalls(TTag tag) {
-            if (invokers.TryGetValue(tag, out InvokerBase invoker)) {
-                return invoker.GetCalls();
+            if (needSetup) Setup();
+            return GetInvokerInternal<Void>(tag)?.GetCalls() ?? Array.Empty<CachedData>();
+        }
+
+        public CachedData GetData(TTag tag) {
+            for (int i = 0; i < _orderedCalls.Length; i++) {
+                var call = _orderedCalls[i];
+                if (call.tag.Equals(tag)) return _runtimeCalls[i];
             }
-            return Array.Empty<CachedData>();
+            return null;
         }
 
         public Action GetDelegate(TTag tag) => GetInvoker(tag).Invoke;
@@ -590,11 +635,6 @@ namespace ExtendedEvents {
             return newInvoker;
         }
 
-        public CachedData GetData(TTag tag) {
-            if (invokers.TryGetValue(tag, out InvokerBase invokerBase)) return invokerBase.GetCalls().First();
-            return null;
-        }
-
         public new EventCall<TTag>[] GetSerializedCalls() => serializedCalls as EventCall<TTag>[];
 
         public IEnumerable<KeyValuePair<TTag, InvokerBase>> GetTagInvokers() {
@@ -603,14 +643,14 @@ namespace ExtendedEvents {
         }
 
         public TValue GetValue<TValue>(TTag tag) {
-            CachedData data = GetData(tag);
+            CachedData data = GetData<Invoker, Void>(tag);
             if (data != null) return data.GetValue<TValue>();
             return default;
         }
 
         public TValue GetValue<TValue, TArg>(TTag tag, TArg eventArg) {
-            CachedData data = GetData(tag);
-            if (data != null) return data.GetValue<TValue, TArg>(eventArg);
+            CachedData data = GetData<Invoker<TArg>, TArg>(tag);
+            if (data != null) return data.GetValue<TArg, TValue>(eventArg);
             return default;
         }
 
@@ -630,8 +670,8 @@ namespace ExtendedEvents {
             if (TryGetInvoker<Invoker, Void>(tag, out InvokerBase invoker)) ((Invoker)invoker).Invoke();
         }
 
-        public void Invoke<TArg>(TTag tag, TArg customArg) {
-            if (TryGetInvoker<Invoker<TArg>, TArg>(tag, out InvokerBase invoker)) ((Invoker<TArg>)invoker).Invoke(customArg);
+        public void Invoke<TArg>(TTag tag, TArg eventArg) {
+            if (TryGetInvoker<Invoker<TArg>, TArg>(tag, out InvokerBase invoker)) ((Invoker<TArg>)invoker).Invoke(eventArg);
         }
 
         public void Remove(TTag tag, Action del) => GetInvoker(tag).del -= del;
@@ -645,22 +685,9 @@ namespace ExtendedEvents {
             }
         }
 
-        /// <summary>Will try to get invoker with specified tag</summary>
-        private bool TryGetInvoker<TInvoker, TArg>(TTag tag, out InvokerBase invoker) where TInvoker : InvokerBase {
-            bool exists = invokers.TryGetValue(tag, out InvokerBase invokerBase);
-            if (exists) {
-                invoker = invokerBase as TInvoker;
-                if (invoker == null) {
-#if UNITY_EDITOR
-                    Debug.LogError($"Can't add {nameof(TInvoker)} to dictionary. This invoker won't be called on events' Invoke call");
-#endif
-                    invoker = GetInvokerInternal<TArg>(tag) as TInvoker;
-                }
-                return true;
-            }
-            invoker = GetInvokerInternal<TArg>(tag);
-            if (invoker != null) _invokers[tag] = invoker;
-            return invoker != null;
+        private CachedData GetData<TInvoker, TArg>(TTag tag) where TInvoker : InvokerBase {
+            if (TryGetInvoker<TInvoker, TArg>(tag, out InvokerBase invokerBase)) return invokerBase.GetCalls().First();
+            return null;
         }
 
         private InvokerBase GetInvokerInternal<TArg>(TTag tag) {
@@ -693,6 +720,27 @@ namespace ExtendedEvents {
                 if (typeof(TArg) == typeof(Void)) return new InvokerInternal(_runtimeCalls, range);
                 return new InvokerInternal<TArg>(_runtimeCalls, range);
             }
+        }
+
+        /// <summary>Will try to get invoker with specified tag</summary>
+        private bool TryGetInvoker<TInvoker, TArg>(TTag tag, out InvokerBase invoker) where TInvoker : InvokerBase {
+            bool exists = invokers.TryGetValue(tag, out InvokerBase invokerBase);
+            if (exists) {
+                invoker = invokerBase as TInvoker;
+                if (invoker == null) {
+#if UNITY_EDITOR
+                    Debug.LogError($"Can't add {typeof(TInvoker)} to dictionary because it already contains {invokerBase.GetType()}. This invoker won't be called on events' Invoke call");
+#endif
+                    invoker = GetInvokerInternal<TArg>(tag) as TInvoker;
+                }
+                return true;
+            }
+            invoker = GetInvokerInternal<TArg>(tag);
+            if (invoker != null) _invokers[tag] = invoker;
+            return invoker != null;
+        }
+
+        private class Void {
         }
     }
 

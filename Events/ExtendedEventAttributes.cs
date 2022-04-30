@@ -15,9 +15,23 @@ namespace ExtendedEvents {
     /// </summary>
     /// Functionality might be expanded later on.
     public class ExtendedEventAttribute : PropertyAttribute {
+        public ExtendedEventAttribute() {
+        }
+        public ExtendedEventAttribute(ParentType parented) {
+            this.parented = parented;
+        }
+
+        public enum ParentType {
+            /// <summary>Event sequencing and coroutine invokation are allowed</summary>
+            Parented,
+            /// <summary>Event sequencing and coroutine invokation are not allowed</summary>
+            Unparented,
+            /// <summary>Events are only used to provide EventCalls</summary>
+            EventBuilder,
+        }
 
         /// <summary>Should event sequencing and coroutine invokation be allowed</summary>
-        public bool parented = true;
+        public ParentType parented = ParentType.Parented;
 
         /// <summary>If true, tag field will be drawn by default drawer specified for it's type</summary>
         public bool useDefaultDrawer = false;

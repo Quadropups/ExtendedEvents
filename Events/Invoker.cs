@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace ExtendedEvents {
     /// <summary>
@@ -42,6 +43,9 @@ namespace ExtendedEvents {
         public virtual IEnumerable<CachedData> GetCalls() => Array.Empty<CachedData>();
 
         public virtual void StopCoroutine() {
+#if UNITY_EDITOR
+            Debug.LogWarning($"{GetType()} doesn't start a coroutine");
+#endif
         }
     }
 }

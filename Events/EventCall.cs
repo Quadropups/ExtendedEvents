@@ -73,27 +73,29 @@ namespace ExtendedEvents {
         [Flags]
         public enum Definition {
             Nothing = 0,
-            Arg0IsEnumerator = 1 << 0,
-            ArgIsEnumeratorAll = 127,
+
+            /// <summary>If true then this method will return negated bool value</summary>
+            NegateBool = 1 << 6,
+            /// <summary>If true then this method will be called once to create a cached argument</summary>
+            CacheReturnValue = 1 << 7,
         }
 
         #endregion
 
+        public bool negateBool => (_definition & Definition.NegateBool) != 0;
+
+        public bool cacheReturnValue => (_definition & Definition.CacheReturnValue) != 0;
+
+
         public Argument GetArgumentAt(int index) {
             return arguments[index];
-        }
-
-        public int GetEnumeratorIndex() {
-            for (int i = 0; i < arguments.Length; i++) {
-                if (((int)_definition & (1 << i)) != 0) return i;
-            }
-            return -1;
         }
 
         public MethodInfo GetMethodInfo() => CachedData.GetMethodInfo(_methodName);
 
         public Type GetParameterType(int index) {
             MethodInfo method = GetMethodInfo();
+            if (method == null) return null;
             if (method.IsStatic) {
                 return method.GetParameters()[index].ParameterType;
             }

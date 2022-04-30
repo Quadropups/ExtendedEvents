@@ -51,15 +51,17 @@ namespace ExtendedEvents {
 
         public delegate TResult RefFuncDelegate<T1, in T2, in T3, in T4, in T5, in T6, in T7, in T8, out TResult>(ref T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8);
 
-        public virtual Type ReturnType => throw new NotImplementedException();
+        public abstract Type ReturnType { get; }
 
         protected virtual bool isCachedArgument => false;
 
         private interface ICachedDataID {
-            int id { get; }
+            CachedData GetEndData();
         }
 
-        public static MethodInfo GetMethodInfo(string methodName) => GetActivator(methodName).GetMethodInfo();
+        public static Type GetCachedDataType(string methodName) => GetActivator(methodName)?.GetType();
+
+        public static MethodInfo GetMethodInfo(string methodName) => GetActivator(methodName)?.GetMethodInfo();
 
         /// <summary>Returns true if any error occured</summary>
         public static void SetupCalls<TTag>(MonoBehaviour parent, EventCall<TTag>[] orderedCalls, out CachedData[] runtimeCalls, out Dictionary<int, CachedData> runtimeReferences) {
@@ -81,13 +83,28 @@ namespace ExtendedEvents {
                     runtimeCalls[i] = new EmptyCall();
                 }
                 else if (call.delayMode == DelayMode.Pause) {
-                    runtimeCalls[i] = new PauseCall(runtimeCalls[i], GetDelayData(call, runtimeReferences));
+                    runtimeCalls[i] = new PauseCall(runtimeCalls[i], GetPauseDelayData(call, runtimeReferences));
                 }
             }
 
             foreach (var data in runtimeReferences.Values) {
                 data?.UpdateReferences(runtimeReferences);
             }
+        }
+
+        protected static CachedData<TDesired> GetCachedDataMethod<TCachedData, T, TDesired>(TCachedData data) where TCachedData : CachedData<T> {
+            if (data is CachedData<TDesired> cast) return cast;
+
+            if (!CasterGetter<T, TDesired>.IsCastable && CasterGetter<TCachedData, TDesired>.IsCastable) {
+                return new CachedArgument<TCachedData>(data).GetCachedData<TDesired>();
+            }
+            return null;
+        }
+
+        protected static CachedData<TDesired> GetCachedDataMethod<TCachedData, T, TDesired>(TCachedData data, CachedData underlyingData) where TCachedData : CachedData<T> {
+            CachedData<TDesired> result = GetCachedDataMethod<TCachedData, T, TDesired>(data);
+            if (result == null) result = underlyingData.GetCachedDataUnderlying<TDesired>();
+            return result;
         }
 
         protected static CachedData MakeCachedArgument(object value, Type desiredType) {
@@ -98,19 +115,15 @@ namespace ExtendedEvents {
             return ci.Invoke(new object[] { value }) as CachedData;
         }
 
-        protected static void UpdateReference(ref CachedData arg, Dictionary<int, CachedData> runtimeReferences) {
-            if (arg is ICachedDataID wrapper) {
-                if (runtimeReferences.TryGetValue(wrapper.id, out CachedData data)) {
-                    arg = data;
-                }
+        protected static void UpdateReference(ref CachedData arg) {
+            if (arg is ICachedDataID idReference) {
+                arg = idReference.GetEndData();
             }
         }
 
-        protected static void UpdateReference<T>(ref CachedData<T> arg, Dictionary<int, CachedData> runtimeReferences) {
-            if (arg is CachedDataID<T> wrapper) {
-                if (runtimeReferences.TryGetValue(wrapper.id, out CachedData data)) {
-                    arg = data?.GetCachedData<T>();
-                }
+        protected static void UpdateReference<T>(ref CachedData<T> arg) {
+            if (arg is CachedDataID<T> idReference) {
+                arg = idReference.GetEndData();
             }
         }
 
@@ -136,23 +149,29 @@ namespace ExtendedEvents {
 
         private static int GetArgumentID(int callId, int argumentIndex) => unchecked(callId + (argumentIndex + 1) * 486187739);
 
-        private static CachedData GetCachedDataID(int id, Type parameterType) {
+        private static CachedData GetCachedDataID(int id, Type parameterType, Dictionary<int, CachedData> runtimeReferences) {
             Type specific = typeof(CachedDataID<>).MakeGenericType(parameterType);
-            ConstructorInfo ci = specific.GetConstructor(new Type[] { typeof(int) });
-            return ci.Invoke(new object[] { id }) as CachedData;
+            ConstructorInfo ci = specific.GetConstructor(new Type[] { typeof(int), typeof(Dictionary<int, CachedData>) });
+            return ci.Invoke(new object[] { id, runtimeReferences }) as CachedData;
         }
 
         private static CachedData GetCachedReturnValue(CachedData method) {
+            if (method.ReturnType == typeof(void)) {
+#if UNITY_EDITOR
+                Debug.LogError($"{method.GetMethodInfo()} doesn't return value and can't be cached");
+#endif
+                return method;
+            }
             Type specific = typeof(CachedReturnValue<>).MakeGenericType(method.ReturnType);
             ConstructorInfo ci = specific.GetConstructor(new Type[] { typeof(CachedData) });
             return ci.Invoke(new object[] { method }) as CachedData;
         }
 
-        private static CachedData GetData(Argument argument, Type parameterType) {
-            return GetCachedDataID(argument.GetIntArgument(), parameterType);
+        private static CachedData GetData(Argument argument, Type parameterType, Dictionary<int, CachedData> runtimeReferences) {
+            return GetCachedDataID(argument.GetIntArgument(), parameterType, runtimeReferences);
         }
 
-        private static CachedData GetData<TTag>(Argument argument, Type parameterType, EventCall<TTag>[] orderedCalls) {
+        private static CachedData GetData<TTag>(Argument argument, Type parameterType, EventCall<TTag>[] orderedCalls, Dictionary<int, CachedData> runtimeReferences) {
             object tag = argument.GetValue(typeof(TTag));
             if (tag == null) {
                 return null;
@@ -161,35 +180,13 @@ namespace ExtendedEvents {
             for (int i = 0; i < orderedCalls.Length; i++) {
                 EventCall<TTag> call = orderedCalls[i];
                 if (tagE?.Equals(call.tag) ?? tag.Equals(call.tag)) {
-                    return GetCachedDataID(call.id, parameterType);
+                    return GetCachedDataID(call.id, parameterType, runtimeReferences);
                 }
             }
             return null;
         }
 
-        private static CachedData<float> GetDelayData(EventCall call) {
-            if (call.delayMode != DelayMode.Wait) return null;
-            if (call.delayID == 0) {
-                return new CachedArgument<float>(call.delayValue);
-            }
-            return new CachedDataID<float>(call.delayID);
-        }
-
-        private static CachedData GetDelayData(EventCall call, Dictionary<int, CachedData> runtimeReferences) {
-            switch (call.delayMode) {
-                default:
-                case DelayMode.NoDelay:
-                    return new CachedArgument<float>(0);
-                case DelayMode.Wait:
-                case DelayMode.Pause:
-                    if (call.delayID != 0 && runtimeReferences.TryGetValue(call.delayID, out CachedData data)) {
-                        return data;
-                    }
-                    return new CachedArgument<float>(call.delayValue);
-            }
-        }
-
-        private static CachedData GetEndData<TTag>(Argument argument, Type parameterType, CachedData parent, EventCall<TTag>[] orderedCalls) {
+        private static CachedData GetEndData<TTag>(Argument argument, Type parameterType, CachedData parent, EventCall<TTag>[] orderedCalls, Dictionary<int, CachedData> runtimeReferences) {
             switch (argument.GetArgType()) {
                 default:
                     return null;
@@ -198,11 +195,11 @@ namespace ExtendedEvents {
                 case Argument.ArgType.Parent:
                     return parent;
                 case Argument.ArgType.IDReference:
-                    return GetData(argument, parameterType);
+                    return GetData(argument, parameterType, runtimeReferences);
                 case Argument.ArgType.TagReference:
-                    return GetData(argument, parameterType, orderedCalls);
+                    return GetData(argument, parameterType, orderedCalls, runtimeReferences);
                 case Argument.ArgType.Method:
-                    return GetMethodData(argument, parent, orderedCalls);
+                    return GetMethodData(argument, parent, orderedCalls, runtimeReferences);
                 case Argument.ArgType.CustomEventArg:
                     return GetEventArgReference(parameterType);
             }
@@ -214,41 +211,61 @@ namespace ExtendedEvents {
             return (CachedData)property.GetValue(null);
         }
 
-        private static CachedData GetMethodData<TTag>(Argument argument, CachedData parent, EventCall<TTag>[] orderedCalls) {
+        private static CachedData GetMethodData<TTag>(Argument argument, CachedData parent, EventCall<TTag>[] orderedCalls, Dictionary<int, CachedData> runtimeReferences) {
             CachedData activator = GetActivator(argument.GetStringArgument());
             if (activator == null) {
                 return null;
             }
 
-            Type[] parameterTypes = activator.GetArgumentTypes();
+            if (!activator.isCachedArgument) {
+                Type[] parameterTypes = activator.GetArgumentTypes();
 
-            for (int i = 0; i < parameterTypes.Length; i++) {
-                Type parameterType = parameterTypes[i];
-                switch (argument.GetFuncArgType(i)) {
-                    default:
-                        ArgumentArrayBuilder[i] = null;
-                        break;
-                    case Argument.ArgType.Data:
-                        ArgumentArrayBuilder[i] = MakeCachedArgument(argument.GetValue(parameterType), parameterType);
-                        break;
-                    case Argument.ArgType.Parent:
-                        ArgumentArrayBuilder[i] = parent;
-                        break;
-                    case Argument.ArgType.IDReference:
-                        ArgumentArrayBuilder[i] = GetData(argument, parameterType);
-                        break;
-                    case Argument.ArgType.TagReference:
-                        ArgumentArrayBuilder[i] = GetData(argument, parameterType, orderedCalls);
-                        break;
-                    case Argument.ArgType.CustomEventArg:
-                        ArgumentArrayBuilder[i] = GetEventArgReference(parameterType);
-                        break;
+                for (int i = 0; i < parameterTypes.Length; i++) {
+                    Type parameterType = parameterTypes[i];
+                    switch (argument.GetFuncArgType(i)) {
+                        default:
+                            ArgumentArrayBuilder[i] = null;
+                            break;
+                        case Argument.ArgType.Data:
+                            ArgumentArrayBuilder[i] = MakeCachedArgument(argument.GetValue(parameterType), parameterType);
+                            break;
+                        case Argument.ArgType.Parent:
+                            ArgumentArrayBuilder[i] = parent;
+                            break;
+                        case Argument.ArgType.IDReference:
+                            ArgumentArrayBuilder[i] = GetData(argument, parameterType, runtimeReferences);
+                            break;
+                        case Argument.ArgType.TagReference:
+                            ArgumentArrayBuilder[i] = GetData(argument, parameterType, orderedCalls, runtimeReferences);
+                            break;
+                        case Argument.ArgType.CustomEventArg:
+                            ArgumentArrayBuilder[i] = GetEventArgReference(parameterType);
+                            break;
+                    }
+                }
+
+                return activator.GetNew(ArgumentArrayBuilder, argument.negateBool, argument.cacheReturnValue);
+            }
+            else {
+                Type parameterType = activator.ReturnType;
+
+                if (argument.GetFuncArgType(0) == Argument.ArgType.Data) {
+                    return MakeCachedArgument(argument.GetValue(parameterType), parameterType);
+                }
+                else {
+                    return null;
                 }
             }
+        }
 
-            CachedData instance = activator.GetNew(ArgumentArrayBuilder, argument.negateBool, argument.cacheReturnValue);
-
-            return instance;
+        private static CachedData<float> GetPauseDelayData(EventCall call, Dictionary<int, CachedData> runtimeReferences) {
+            if (call.delayID != 0) {
+                if (runtimeReferences.TryGetValue(call.delayID, out CachedData data)) {
+                    return data.GetCachedData<float>();
+                }
+                return null;
+            }
+            return new CachedArgument<float>(call.delayValue);
         }
 
         private static CachedData GetRuntimeData<TTag>(EventCall call, CachedData parentReference, EventCall<TTag>[] orderedCalls, Dictionary<int, CachedData> runtimeReferences) {
@@ -259,8 +276,6 @@ namespace ExtendedEvents {
                 return null;
             }
 
-            CachedData callData;
-
             if (!activator.isCachedArgument) {
                 //setup each argument
                 Type[] parameterTypes = activator.GetArgumentTypes();
@@ -270,30 +285,42 @@ namespace ExtendedEvents {
                 }
 
                 for (int i = 0; i < call.arguments.Length; i++) {
-                    var argData = GetEndData(call.arguments[i], parameterTypes[i], parentReference, orderedCalls);
+                    CachedData argData = GetEndData(call.arguments[i], parameterTypes[i], parentReference, orderedCalls, runtimeReferences);
                     if (call.arguments[i].isReferencable) {
                         runtimeReferences.Add(GetArgumentID(call.id, i), argData);
                     }
                     CallArrayBuilder[i] = argData;
                 }
 
-                callData = activator.GetNew(parentReference, CallArrayBuilder, call.GetEnumeratorIndex(), GetDelayData(call));
+                CachedData callData = activator.GetNew(parentReference, CallArrayBuilder, call, GetWaitDelayData(call, runtimeReferences));
+                runtimeReferences.Add(call.id, callData);
+                return callData;
             }
             else {
-                //callData = MakeCachedArgument(call.GetArgumentAt(0), Type.GetType(call.methodName));
-                callData = activator.GetCachedArgument(call.GetArgumentAt(0));
+                if (call.arguments.Length > 0 && call.arguments[0].isReferencable) {
+                    CachedData argumentData = GetEndData(call.arguments[0], activator.ReturnType, parentReference, orderedCalls, runtimeReferences);
+                    runtimeReferences.Add(call.id, argumentData);
+                    return argumentData;
+                }
+                else {
+                    return null;
+                }
             }
+        }
 
-
-            runtimeReferences.Add(call.id, callData);
-            return callData;
+        private static CachedData<float> GetWaitDelayData(EventCall call, Dictionary<int, CachedData> runtimeReferences) {
+            if (call.delayMode != DelayMode.Wait) return null;
+            if (call.delayID == 0) {
+                return new CachedArgument<float>(call.delayValue);
+            }
+            return new CachedDataID<float>(call.delayID, runtimeReferences);
         }
 
         private static CachedData MakeCachedData(MethodInfo method) {
             bool methodIsStatic = method.IsStatic;
             Type returnType = method.ReturnType;
             bool methodIsFunc = returnType != typeof(void);
-            bool instanceIsStruct = !methodIsStatic && method.ReflectedType.IsValueType;
+            bool instanceIsStruct = !methodIsStatic && method.DeclaringType.IsValueType;
 
             ParameterInfo[] parameters = method.GetParameters();
 
@@ -413,30 +440,30 @@ namespace ExtendedEvents {
             return ci.Invoke(Array.Empty<object>()) as CachedData;
         }
 
-        public virtual MethodInfo GetMethodInfo() {
-            throw new NotImplementedException();
-        }
+        public abstract MethodInfo GetMethodInfo();
 
         public virtual float GetPauseDuration() => 0;
 
-        public virtual T GetValue<T>() {
-            throw new NotImplementedException();
-        }
+        public virtual float GetPauseDuration<TArg>(TArg eventArg) => 0;
 
-        public virtual T GetValue<T, TArg>(TArg eventArg) {
-            throw new NotImplementedException();
-        }
+        public abstract T GetValue<T>();
 
-        public virtual void Invoke() {
-            throw new NotImplementedException();
-        }
+        public abstract T GetValue<TArg, T>(TArg eventArg);
 
-        public virtual void Invoke<TArg>(TArg eventArg) {
-            Debug.Log(GetType());
-            throw new NotImplementedException();
+        public abstract void Invoke();
+
+        public abstract void Invoke<TArg>(TArg eventArg);
+
+        public virtual void SetValue<T>(T value) {
+#if UNITY_EDITOR
+            Debug.LogError($"Method {GetType()} does not store a value");
+#endif
         }
 
         public virtual void StopCoroutine() {
+#if UNITY_EDITOR
+            Debug.LogWarning($"{GetType()} doesn't start a coroutine");
+#endif
         }
 
         protected virtual Type[] GetArgumentTypes() {
@@ -447,32 +474,25 @@ namespace ExtendedEvents {
             throw new NotImplementedException();
         }
 
-        protected CachedData<T> GetCachedData<T>() {
-            if (this is CachedData<T> cast) return cast;
-            return new Caster<T>(this);
-        }
+        protected abstract CachedData<TDesired> GetCachedData<TDesired>();
+
+        protected abstract CachedData<TDesired> GetCachedDataUnderlying<TDesired>();
 
         protected virtual CachedData GetInstance() {
             throw new NotImplementedException();
         }
 
-        protected virtual void SetArguments(CachedData[] arguments) {
-            throw new NotImplementedException();
-        }
+        protected abstract void SetArguments(CachedData[] arguments);
 
         protected virtual void SetMethod(MethodInfo method) {
         }
 
         /// <summary>Method used to retrieve Referenced data when runtime data setup is finalized</summary>
-        protected virtual void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-            throw new NotImplementedException();
-        }
+        protected abstract void UpdateReferences(Dictionary<int, CachedData> runtimeReferences);
 
-        private CachedData GetNew(CachedData parent, CachedData[] arguments, int enumeratorIndex, CachedData<float> delayData) {
+        private CachedData GetNew(CachedData parent, CachedData[] arguments, EventCall call, CachedData<float> delayData) {
             CachedData newInstance = GetInstance();
-            if (enumeratorIndex >= 0) {
-                newInstance = MakeEnumeratorMethod(newInstance, enumeratorIndex);
-            }
+
             if (delayData != null) {
                 newInstance = new DelayedMethod(newInstance, parent, delayData);
             }
@@ -481,6 +501,10 @@ namespace ExtendedEvents {
             }
 
             newInstance.SetArguments(arguments);
+
+            if (call.negateBool) newInstance = new CachedBoolNegator(newInstance);
+
+            if (call.cacheReturnValue) newInstance = GetCachedReturnValue(newInstance);
 
             return newInstance;
         }
@@ -496,16 +520,7 @@ namespace ExtendedEvents {
             return newInstance;
         }
 
-        private CachedData MakeEnumeratorMethod(CachedData instance, int enumeratorIndex) {
-            Type enumeratorType = GetArgumentTypes()[enumeratorIndex];
-            Type foreachInvokerType;
-            if (ReturnType == typeof(void)) foreachInvokerType = typeof(ForeachInvoker<>).MakeGenericType(enumeratorType);
-            else foreachInvokerType = typeof(ForeachInvoker<,>).MakeGenericType(enumeratorType, ReturnType);
-            ConstructorInfo fi = foreachInvokerType.GetConstructor(new Type[] { typeof(CachedData), typeof(int) });
-            return fi.Invoke(new object[] { instance, enumeratorIndex }) as CachedData;
-        }
-
-        protected abstract class CachedActionBase<TDelegate> : CachedMethod<TDelegate, Void> where TDelegate : Delegate {
+        protected abstract class CachedActionBase<TDelegate> : CachedMethod<TDelegate, Void>, ICachedMethod<TDelegate> where TDelegate : Delegate {
             public override Type ReturnType => typeof(void);
 
             public override Void GetValue() {
@@ -532,48 +547,186 @@ namespace ExtendedEvents {
                 return default;
             }
 
-            public override T GetValue<T, TArg>(TArg eventArg) {
+            public override T GetValue<TArg, T>(TArg eventArg) {
                 Invoke(eventArg);
 #if UNITY_EDITOR
                 Debug.LogError($"Method {GetMethodInfo()} has no return value");
 #endif
                 return default;
             }
+
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CachedActionBase<TDelegate>, Void, TDesired>(this);
         }
 
-        protected abstract class CachedFuncBase<TDelegate, TResult> : CachedMethod<TDelegate, TResult> where TDelegate : Delegate {
+        protected abstract class CachedFuncBase<TDelegate, TResult> : CachedMethod<TDelegate, TResult>, ICachedMethod<TDelegate>, IValueReturner<TResult> where TDelegate : Delegate {
             public override Type ReturnType => typeof(TResult);
 
             public override T GetValue<T>() {
                 return TypeCaster<TResult, T>.Cast(GetValue());
             }
 
-            public override T GetValue<T, TArg>(TArg eventArg) {
+            public override T GetValue<TArg, T>(TArg eventArg) {
                 return TypeCaster<TResult, T>.Cast(GetValue(eventArg));
             }
 
             public override void Invoke() => GetValue();
 
             public override void Invoke<TArg>(TArg eventArg) => GetValue(eventArg);
+
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CachedFuncBase<TDelegate, TResult>, TResult, TDesired>(this);
+        }
+
+        /// <summary>
+        /// Base class for any method in <see cref="ExtendedEvent"/>.
+        /// </summary>
+        protected abstract class CachedMethod<TDelegate, TResult> : CachedData<TResult> where TDelegate : Delegate {
+            #region Fields
+
+            protected TDelegate method;
+
+            private static Type[] ParameterTypes = ExtendedEvent.MakeParameterTypeArray(typeof(TDelegate));
+
+            #endregion
+
+            public TDelegate GetMethod() => method;
+
+            public override MethodInfo GetMethodInfo() => method.Method;
+
+            /// <summary>
+            /// Use this method to set delegate during runtime.
+            /// </summary>
+            public void SetMethod(TDelegate method) => this.method = method;
+
+            protected abstract CachedMethod<TDelegate, TResult> CreateInstance();
+
+            protected override Type[] GetArgumentTypes() => ParameterTypes;
+
+            protected override CachedData GetInstance() {
+                CachedMethod<TDelegate, TResult> newInstance = CreateInstance();
+                newInstance.method = method;
+                return newInstance;
+            }
+
+            protected override void SetMethod(MethodInfo method) {
+                if (method.IsStatic) this.method = (TDelegate)method.CreateDelegate(typeof(TDelegate));
+                else this.method = (TDelegate)method.CreateDelegate(typeof(TDelegate), null);
+            }
+        }
+
+        protected class Caster<T> : CachedData<T> {
+            #region Fields
+
+            private CachedData _method;
+
+            #endregion
+
+            public Caster(CachedData method) {
+                _method = method;
+            }
+
+            public override Type ReturnType => throw new NotImplementedException();
+
+            public override MethodInfo GetMethodInfo() {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
+                throw new NotImplementedException();
+            }
+
+            public override T GetValue() => _method.GetValue<T>();
+
+            public override T1 GetValue<T1>() {
+                throw new NotImplementedException();
+            }
+
+            public override T GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg, T>(eventArg);
+
+            public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke<TArg>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            protected override CachedData<T1> GetCachedDataUnderlying<T1>() {
+                throw new NotImplementedException();
+            }
+
+            protected override void SetArguments(CachedData[] arguments) {
+                throw new NotImplementedException();
+            }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
+                _method.UpdateReferences(runtimeReferences);
+            }
+        }
+
+        protected static class CasterGetter<T, TResult> {
+            #region Fields
+
+            public static bool IsCastable;
+
+            public static Func<CachedData<T>, CachedData<TResult>> GetCaster;
+
+            #endregion
+
+            static CasterGetter() {
+                IsCastable = GetIsCastableBool();
+                try {
+                    Type directCasterType = typeof(DirectCaster<,>).MakeGenericType(typeof(T), typeof(TResult));
+                    MethodInfo getNewMethod = directCasterType.GetMethod("GetNew", BindingFlags.Static | BindingFlags.Public);
+                    GetCaster = (Func<CachedData<T>, CachedData<TResult>>)getNewMethod.CreateDelegate(typeof(Func<CachedData<T>, CachedData<TResult>>));
+
+                }
+                catch {
+                    GetCaster = (o) => new Caster<TResult>(o);
+                }
+            }
+
+            /// <summary>Determines whether an instance of a specified type c can be casted to a variable of the current type using TypeCaster.</summary>
+            private static bool GetIsCastableBool() {
+                //Certain types can't be used as generic arguments of a generic type (pointers for example). Rather than overly complicating the code we just use try-catch
+                Type caster;
+                try {
+                    caster = typeof(TypeCaster<,>).MakeGenericType(new Type[] { typeof(T), typeof(TResult) });
+                }
+                catch {
+                    return false;
+                }
+                try {
+                    return (bool)caster.GetProperty("IsValid", BindingFlags.Static | BindingFlags.Public).GetValue(null);
+                }
+                catch {
+                    return false;
+                }
+            }
         }
 
         protected class CoroutineStarter : CoroutineWrapper {
             public CoroutineStarter(CachedData method, CachedData parentCaster) : base(method, parentCaster) {
             }
 
+            public override Type ReturnType => typeof(IEnumerator);
+
+            public override IEnumerator GetValue() => _method.GetValue<IEnumerator>();
+
+            public override IEnumerator GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg, IEnumerator>(eventArg);
+
             public override void Invoke() {
                 _coroutine = StartCoroutine(_method.GetValue<IEnumerator>());
             }
 
             public override void Invoke<TArg>(TArg eventArg) {
-                _coroutine = StartCoroutine(_method.GetValue<IEnumerator, TArg>(eventArg));
+                _coroutine = StartCoroutine(_method.GetValue<TArg, IEnumerator>(eventArg));
             }
-
-            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) => _method.UpdateReferences(runtimeReferences);
         }
 
-        protected abstract class CoroutineWrapper : MethodWrapper {
+        protected abstract class CoroutineWrapper : CachedData<IEnumerator>, IValueReturner<IEnumerator>, ICoroutineStarter {
             #region Fields
+
+            protected CachedData _method;
 
             protected Coroutine _coroutine;
 
@@ -581,17 +734,26 @@ namespace ExtendedEvents {
 
             #endregion
 
-            protected CoroutineWrapper(CachedData method, CachedData parentCaster) : base(method) {
+            protected CoroutineWrapper(CachedData method, CachedData parentCaster) {
+                _method = method;
                 _parentReference = parentCaster;
             }
+
+            public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
 
             public override void StopCoroutine() {
                 if (_coroutine != null) _parentReference.GetValue<MonoBehaviour>().StopCoroutine(_coroutine);
             }
 
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CoroutineWrapper, IEnumerator, TDesired>(this, _method);
+
+            protected override void SetArguments(CachedData[] arguments) => _method.SetArguments(arguments);
+
             protected Coroutine StartCoroutine(IEnumerator routine) {
                 return _parentReference.GetValue<MonoBehaviour>().StartCoroutine(routine);
             }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) => _method.UpdateReferences(runtimeReferences);
         }
 
         protected class DelayedMethod : CoroutineWrapper {
@@ -609,74 +771,108 @@ namespace ExtendedEvents {
                 _methodIsCoroutine = method.ReturnType == typeof(IEnumerator);
             }
 
+            public override Type ReturnType => typeof(IEnumerator);
+
+            public override IEnumerator GetValue() => DelayedInvoke();
+
+            public override IEnumerator GetValue<TArg>(TArg eventArg) => DelayedInvoke(eventArg);
+
             public override void Invoke() {
                 _coroutine = StartCoroutine(DelayedInvoke());
             }
 
+            public override void Invoke<TArg>(TArg eventArg) {
+                _coroutine = StartCoroutine(DelayedInvoke(eventArg));
+            }
+
             protected virtual IEnumerator DelayedInvoke() {
                 float delay = _delayData.GetValue<float>();
-                if (delay <= 0) yield break;
-                if (Time.inFixedTimeStep) {
-                    float targetTime = Time.time + delay;
-                    while (Time.time < targetTime) yield return new WaitForFixedUpdate();
+                if (delay >= 0) {
+                    if (Time.inFixedTimeStep) {
+                        float targetTime = Time.time + delay;
+                        while (Time.time < targetTime) yield return new WaitForFixedUpdate();
+                    }
+                    else yield return new WaitForSeconds(delay);
                 }
-                else yield return new WaitForSeconds(delay);
+
                 if (_methodIsCoroutine) yield return _method.GetValue<IEnumerator>();
+                else _method.Invoke();
+            }
+
+            protected virtual IEnumerator DelayedInvoke<TArg>(TArg eventArg) {
+                float delay = _delayData.GetValue<TArg, float>(eventArg);
+                if (delay >= 0) {
+                    if (Time.inFixedTimeStep) {
+                        float targetTime = Time.time + delay;
+                        while (Time.time < targetTime) yield return new WaitForFixedUpdate();
+                    }
+                    else yield return new WaitForSeconds(delay);
+                }
+
+                if (_methodIsCoroutine) yield return _method.GetValue<TArg, IEnumerator>(eventArg);
                 else _method.Invoke();
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
                 _method.UpdateReferences(runtimeReferences);
-                UpdateReference(ref _delayData, runtimeReferences);
+                UpdateReference(ref _delayData);
             }
         }
 
-        protected abstract class MethodWrapper : CachedData {
+        protected class DirectCaster<TDerived, T> : CachedData<T> where TDerived : T {
             #region Fields
 
-            protected CachedData _method;
+            private CachedData<TDerived> _method;
 
             #endregion
 
-            protected MethodWrapper(CachedData method) {
+            private DirectCaster(CachedData<TDerived> method) {
                 _method = method;
             }
 
-            public override Type ReturnType => _method.ReturnType;
+            public override Type ReturnType => throw new NotImplementedException();
 
-            public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
+            public static DirectCaster<TDerived, T> GetNew(CachedData<TDerived> method) => new DirectCaster<TDerived, T>(method);
 
-            public override T GetValue<T>() => _method.GetValue<T>();
-
-            public override void StopCoroutine() {
-                _method.StopCoroutine();
+            public override MethodInfo GetMethodInfo() {
+                throw new NotImplementedException();
             }
 
-            protected override void SetArguments(CachedData[] arguments) => _method.SetArguments(arguments);
+            public override T GetValue() => _method.GetValue();
+
+            public override T1 GetValue<T1>() {
+                throw new NotImplementedException();
+            }
+
+            public override T GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg>(eventArg);
+
+            public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke<TArg>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
+                throw new NotImplementedException();
+            }
+
+            protected override CachedData<T1> GetCachedDataUnderlying<T1>() {
+                throw new NotImplementedException();
+            }
+
+            protected override void SetArguments(CachedData[] arguments) {
+                throw new NotImplementedException();
+            }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
+                throw new NotImplementedException();
+            }
         }
 
-        protected abstract class MethodWrapper<TValue> : CachedData<TValue> {
-            #region Fields
-
-            protected CachedData _method;
-
-            #endregion
-
-            protected MethodWrapper(CachedData method) {
-                _method = method;
-            }
-
-            public override Type ReturnType => _method.ReturnType;
-
-            public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
-
-            public override T GetValue<T>() => TypeCaster<TValue, T>.Cast(GetValue());
-
-            public override void StopCoroutine() {
-                _method.StopCoroutine();
-            }
-
-            protected override void SetArguments(CachedData[] arguments) => _method.SetArguments(arguments);
+        /// <summary>Fake void return type for Action delegates</summary>
+        protected class Void {
         }
 
         private class CachedAction : CachedActionBase<Action> {
@@ -721,7 +917,7 @@ value);
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg, runtimeReferences);
+                UpdateReference(ref arg);
             }
         }
 
@@ -758,8 +954,8 @@ arg2.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
             }
         }
 
@@ -801,9 +997,9 @@ arg3.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
             }
         }
 
@@ -850,10 +1046,10 @@ arg4.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
             }
         }
 
@@ -905,11 +1101,11 @@ arg5.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
             }
         }
 
@@ -966,12 +1162,12 @@ arg6.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
             }
         }
 
@@ -1033,13 +1229,13 @@ arg7.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
             }
         }
 
@@ -1106,34 +1302,114 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
-                UpdateReference(ref arg8, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
+                UpdateReference(ref arg8);
             }
         }
 
-        private class CachedBoolNegator : MethodWrapper<bool> {
-            public CachedBoolNegator(CachedData method) : base(method) {
+        private class CachedBoolNegator : CachedData<bool>, IValueReturner<bool> {
+            #region Fields
+
+            private CachedData _method;
+
+            #endregion
+
+            public CachedBoolNegator(CachedData method) {
+                _method = method;
             }
+
+            public override Type ReturnType => typeof(bool);
+
+            public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
 
             public override bool GetValue() => !_method.GetValue<bool>();
 
+            public override bool GetValue<TArg>(TArg eventArg) => !_method.GetValue<TArg, bool>(eventArg);
+
             public override void Invoke() => _method.Invoke();
+
+            public override void Invoke<TArg>(TArg eventArg) => _method.Invoke(eventArg);
+
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CachedBoolNegator, bool, TDesired>(this, _method);
+
+            protected override void SetArguments(CachedData[] arguments) => _method.SetArguments(arguments);
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) => _method.UpdateReferences(runtimeReferences);
         }
 
         private class CachedDataID<T> : CachedData<T>, ICachedDataID {
-            public CachedDataID(int id) {
+            #region Fields
+
+            private int id;
+
+            private Dictionary<int, CachedData> runtimeReferences;
+
+            #endregion
+
+            public CachedDataID(int id, Dictionary<int, CachedData> runtimeReferences) {
                 this.id = id;
+                this.runtimeReferences = runtimeReferences;
             }
 
-            public int id { get; }
+            public override Type ReturnType => throw new NotImplementedException();
+
+            public CachedData<T> GetEndData() {
+                if (runtimeReferences.TryGetValue(id, out CachedData data)) {
+                    return data.GetCachedData<T>();
+                }
+                return null;
+            }
+
+            public override void Invoke() {
+                throw new NotImplementedException();
+            }
+
+            public override MethodInfo GetMethodInfo() {
+                throw new NotImplementedException();
+            }
+
+            public override T GetValue() {
+                throw new NotImplementedException();
+            }
+
+            public override T1 GetValue<T1>() {
+                throw new NotImplementedException();
+            }
+
+            public override T GetValue<TArg>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke<TArg>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => this as CachedData<TDesired>;
+
+            protected override void SetArguments(CachedData[] arguments) {
+                throw new NotImplementedException();
+            }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
+                throw new NotImplementedException();
+            }
+
+            CachedData ICachedDataID.GetEndData() {
+                if (runtimeReferences.TryGetValue(id, out CachedData data)) {
+                    return data;
+                }
+                return null;
+            }
         }
 
         private class CachedFunc<TResult> : CachedFuncBase<Func<TResult>, TResult> {
@@ -1178,7 +1454,7 @@ value);
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg, runtimeReferences);
+                UpdateReference(ref arg);
             }
         }
 
@@ -1215,8 +1491,8 @@ arg2.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
             }
         }
 
@@ -1258,9 +1534,9 @@ arg3.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
             }
         }
 
@@ -1307,10 +1583,10 @@ arg4.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
             }
         }
 
@@ -1362,11 +1638,11 @@ arg5.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
             }
         }
 
@@ -1423,12 +1699,12 @@ arg6.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
             }
         }
 
@@ -1490,13 +1766,13 @@ arg7.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
             }
         }
 
@@ -1563,14 +1839,14 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
-                UpdateReference(ref arg8, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
+                UpdateReference(ref arg8);
             }
         }
 
@@ -1602,7 +1878,7 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg, runtimeReferences);
+                UpdateReference(ref arg);
             }
         }
 
@@ -1639,8 +1915,8 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
             }
         }
 
@@ -1682,9 +1958,9 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
             }
         }
 
@@ -1731,10 +2007,10 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
             }
         }
 
@@ -1786,11 +2062,11 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
             }
         }
 
@@ -1847,12 +2123,12 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
             }
         }
 
@@ -1914,13 +2190,13 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
             }
         }
 
@@ -1987,14 +2263,14 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
-                UpdateReference(ref arg8, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
+                UpdateReference(ref arg8);
             }
         }
 
@@ -2026,7 +2302,7 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg, runtimeReferences);
+                UpdateReference(ref arg);
             }
         }
 
@@ -2063,8 +2339,8 @@ arg2.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
             }
         }
 
@@ -2106,9 +2382,9 @@ arg3.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
             }
         }
 
@@ -2155,10 +2431,10 @@ arg4.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
             }
         }
 
@@ -2210,11 +2486,11 @@ arg5.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
             }
         }
 
@@ -2271,12 +2547,12 @@ arg6.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
             }
         }
 
@@ -2338,13 +2614,13 @@ arg7.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
             }
         }
 
@@ -2411,81 +2687,69 @@ arg8.GetValue(eventArg));
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                UpdateReference(ref arg1, runtimeReferences);
-                UpdateReference(ref arg2, runtimeReferences);
-                UpdateReference(ref arg3, runtimeReferences);
-                UpdateReference(ref arg4, runtimeReferences);
-                UpdateReference(ref arg5, runtimeReferences);
-                UpdateReference(ref arg6, runtimeReferences);
-                UpdateReference(ref arg7, runtimeReferences);
-                UpdateReference(ref arg8, runtimeReferences);
+                UpdateReference(ref arg1);
+                UpdateReference(ref arg2);
+                UpdateReference(ref arg3);
+                UpdateReference(ref arg4);
+                UpdateReference(ref arg5);
+                UpdateReference(ref arg6);
+                UpdateReference(ref arg7);
+                UpdateReference(ref arg8);
             }
         }
 
-        private class CachedReturnValue<TValue> : MethodWrapper<TValue> {
+        private class CachedReturnValue<TValue> : CachedArgument<TValue> {
             #region Fields
 
-            private TValue _value;
+            private CachedData _method;
 
             private bool _needCache = true;
 
             #endregion
 
-            public CachedReturnValue(CachedData method) : base(method) {
+            public CachedReturnValue(CachedData method) : base(default) {
+                _method = method;
             }
 
             public override TValue GetValue() {
                 if (_needCache) {
-                    _value = _method.GetValue<TValue>();
+                    value = _method.GetValue<TValue>();
                     _needCache = false;
                 }
-                return _value;
+                return value;
             }
 
             public override TValue GetValue<TArg>(TArg eventArg) {
                 if (_needCache) {
-                    _value = _method.GetValue<TValue, TArg>(eventArg);
+                    value = _method.GetValue<TArg, TValue>(eventArg);
                     _needCache = false;
                 }
-                return _value;
+                return value;
             }
 
-            public override T GetValue<T, TArg>(TArg eventArg) {
+            public override T GetValue<TArg, T>(TArg eventArg) {
                 if (_needCache) {
-                    _value = _method.GetValue<TValue, TArg>(eventArg);
+                    value = _method.GetValue<TArg, TValue>(eventArg);
                     _needCache = false;
                 }
-                return TypeCaster<TValue, T>.Cast(_value);
+                return TypeCaster<TValue, T>.Cast(value);
             }
 
-            public override void Invoke() => _method.Invoke();
+            public override void Invoke() => GetValue();
+
+            public override void Invoke<TArg>(TArg eventArg) => GetValue(eventArg);
+
+            public override void SetValue(TValue value) {
+                _needCache = false;
+                base.SetValue(value);
+            }
+
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CachedReturnValue<TValue>, TValue, TDesired>(this, _method);
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) => _method.UpdateReferences(runtimeReferences);
         }
 
-        private class Caster<T> : CachedData<T> {
-            #region Fields
-
-            private CachedData _method;
-
-            #endregion
-
-            public Caster(CachedData method) {
-                _method = method;
-            }
-
-            public CachedData method => _method;
-
-            public override T GetValue() => _method.GetValue<T>();
-
-            public override T GetValue<TArg>(TArg eventArg) => _method.GetValue<T, TArg>(eventArg);
-
-            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                _method.UpdateReferences(runtimeReferences);
-            }
-        }
-
-        private class EmptyCall : CachedData {
+        private class EmptyCall : CachedData<Void> {
             public override Type ReturnType => typeof(void);
 
             public override MethodInfo GetMethodInfo() => ((Action)Invoke).Method;
@@ -2497,10 +2761,28 @@ arg8.GetValue(eventArg));
                 return default;
             }
 
+            public override Void GetValue() => default;
+
+            public override T GetValue<TArg, T>(TArg eventArg) => GetValue<T>();
+
+            public override Void GetValue<TArg>(TArg eventArg) => default;
+
             public override void Invoke() {
             }
 
             public override void Invoke<TArg>(TArg eventArg) {
+            }
+
+            protected override CachedData<T1> GetCachedDataUnderlying<T1>() {
+                throw new NotImplementedException();
+            }
+
+            protected override void SetArguments(CachedData[] arguments) {
+                throw new NotImplementedException();
+            }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
+                throw new NotImplementedException();
             }
         }
 
@@ -2509,6 +2791,14 @@ arg8.GetValue(eventArg));
 
             public override Type ReturnType => typeof(T);
 
+            public override MethodInfo GetMethodInfo() {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
+                throw new NotImplementedException();
+            }
+
             public override T GetValue() {
 #if UNITY_EDITOR
                 Debug.LogError("No custom argument was provided");
@@ -2516,107 +2806,40 @@ arg8.GetValue(eventArg));
                 return default;
             }
 
+            public override T1 GetValue<T1>() {
+                throw new NotImplementedException();
+            }
+
             public override T GetValue<TArg>(TArg eventArg) => TypeCaster<TArg, T>.Cast(eventArg);
 
-            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-            }
-        }
-
-        private class ForeachInvoker<TElement> : MethodWrapper {
-            #region Fields
-
-            protected int enumeratorIndex;
-
-            //Since CachedArgument<T> doesn't implement IData interface we need to create a special type for the substituted argument
-            protected ArgumentSubstitute substitutedArgument = new ArgumentSubstitute();
-
-            protected CachedData foreachArgument;
-
-            #endregion
-
-            public ForeachInvoker(CachedData method, int enumeratorIndex) : base(method) {
-                this.enumeratorIndex = enumeratorIndex;
-            }
-
-            public override void Invoke() {
-                foreach (var value in foreachArgument.GetValue<IEnumerable<TElement>>()) {
-                    substitutedArgument.SetValue(value);
-                    _method.Invoke();
-                }
+            public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
             }
 
             public override void Invoke<TArg>(TArg eventArg) {
-                try {
-                    foreach (var value in foreachArgument.GetValue<IEnumerable<TElement>, TArg>(eventArg)) {
-                        substitutedArgument.SetValue(value);
-                        _method.Invoke(eventArg);
-                    }
-                }
-                catch (Exception e) {
-                    Debug.Log(e);
-                }
+                throw new NotImplementedException();
             }
 
+            protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => this as CachedData<TDesired>;
+
             protected override void SetArguments(CachedData[] arguments) {
-                foreachArgument = arguments[enumeratorIndex];
-
-                CachedData[] substitutedArguments = new CachedData[arguments.Length];
-                for (int i = 0; i < arguments.Length; i++) {
-                    if (i != enumeratorIndex) substitutedArguments[i] = arguments[i];
-                    else substitutedArguments[i] = substitutedArgument;
-                }
-
-                _method.SetArguments(substitutedArguments);
+                throw new NotImplementedException();
             }
 
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
-                _method.UpdateReferences(runtimeReferences);
-                UpdateReference(ref foreachArgument, runtimeReferences);
-            }
-
-            /// <summary>Argument of a foreach iterator that's get's sunstitued when it goes through a collection</summary>
-            protected class ArgumentSubstitute : CachedData {
-                #region Fields
-
-                private TElement arg;
-
-                #endregion
-
-                public override T GetValue<T, TArg>(TArg eventArg) => TypeCaster<TElement, T>.Cast(arg);
-
-                public void SetValue(TElement value) => this.arg = value;
             }
         }
 
-        private class ForeachInvoker<TElement, TResult> : ForeachInvoker<TElement> {
-            public ForeachInvoker(CachedData cachedMethod, int enumeratorIndex) : base(cachedMethod, enumeratorIndex) {
-            }
-
-            public override Type ReturnType => typeof(IEnumerable<TResult>);
-
-            public override T GetValue<T>() {
-                if (GetValueEnumerator() is T cast) return cast;
-                return base.GetValue<T>();
-            }
-
-            private IEnumerable<TResult> GetValueEnumerator() {
-                foreach (var value in foreachArgument.GetValue<IEnumerable<TElement>>()) {
-                    substitutedArgument.SetValue(value);
-                    yield return _method.GetValue<TResult>();
-                }
-            }
-        }
-
-        private class PauseCall : CachedData {
+        private class PauseCall : CachedData<Void> {
             #region Fields
 
             private CachedData _method;
 
-            private CachedData _pauseData;
+            private CachedData<float> _pauseData;
 
             #endregion
 
-            public PauseCall(CachedData method, CachedData pauseData) {
+            public PauseCall(CachedData method, CachedData<float> pauseData) {
                 _method = method;
                 _pauseData = pauseData;
             }
@@ -2625,15 +2848,35 @@ arg8.GetValue(eventArg));
 
             public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
 
-            public override float GetPauseDuration() => _pauseData.GetValue<float>();
+            public override float GetPauseDuration() => _pauseData.GetValue();
+
+            public override float GetPauseDuration<TArg>(TArg eventArg) => _pauseData.GetValue<TArg>(eventArg);
 
             public override T GetValue<T>() => _method.GetValue<T>();
+
+            public override Void GetValue() => _method.GetValue<Void>();
+
+            public override T GetValue<TArg, T>(TArg eventArg) => _method.GetValue<TArg, T>(eventArg);
+
+            public override Void GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg, Void>(eventArg);
 
             public override void Invoke() => _method.Invoke();
 
             public override void Invoke<TArg>(TArg eventArg) => _method.Invoke(eventArg);
 
             public override void StopCoroutine() => _method.StopCoroutine();
+
+            protected override CachedData<T1> GetCachedDataUnderlying<T1>() {
+                throw new NotImplementedException();
+            }
+
+            protected override void SetArguments(CachedData[] arguments) {
+                throw new NotImplementedException();
+            }
+
+            protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) {
+                throw new NotImplementedException();
+            }
         }
     }
 }

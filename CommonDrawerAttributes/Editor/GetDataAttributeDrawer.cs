@@ -100,7 +100,10 @@ namespace ExtendedEvents {
 
                 for (int i = 0; i < call.argumentCount; i++) {
                     int argId = GetArgumentID(call.id, i);
-                    string del = call.GetArgumentAt(i).GetReturnName(call.GetParameterType(i));
+                    Type callParameterType = call.GetParameterType(i);
+                    string del;
+                    if (callParameterType == null) del = "null";
+                    else del = call.GetArgumentAt(i).GetReturnName(call.GetParameterType(i));
                     if (del != null) {
                         menu.AddItem(new GUIContent($"{guiContent} / Arg {i}. {del}"), intArgument.intValue == argId, SelectCall, new SelectedIData(intArgument, argId));
                     }
