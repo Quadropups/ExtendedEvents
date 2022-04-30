@@ -455,15 +455,9 @@ namespace ExtendedEvents {
         public abstract void Invoke<TArg>(TArg eventArg);
 
         public virtual void SetValue<T>(T value) {
-#if UNITY_EDITOR
-            Debug.LogError($"Method {GetType()} does not store a value");
-#endif
         }
 
         public virtual void StopCoroutine() {
-#if UNITY_EDITOR
-            Debug.LogWarning($"{GetType()} doesn't start a coroutine");
-#endif
         }
 
         protected virtual Type[] GetArgumentTypes() {
@@ -630,10 +624,6 @@ namespace ExtendedEvents {
                 throw new NotImplementedException();
             }
 
-            public override void Invoke() {
-                throw new NotImplementedException();
-            }
-
             public override T GetValue() => _method.GetValue<T>();
 
             public override T1 GetValue<T1>() {
@@ -643,6 +633,10 @@ namespace ExtendedEvents {
             public override T GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg, T>(eventArg);
 
             public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
                 throw new NotImplementedException();
             }
 
@@ -708,8 +702,6 @@ namespace ExtendedEvents {
             public CoroutineStarter(CachedData method, CachedData parentCaster) : base(method, parentCaster) {
             }
 
-            public override Type ReturnType => typeof(IEnumerator);
-
             public override IEnumerator GetValue() => _method.GetValue<IEnumerator>();
 
             public override IEnumerator GetValue<TArg>(TArg eventArg) => _method.GetValue<TArg, IEnumerator>(eventArg);
@@ -723,7 +715,7 @@ namespace ExtendedEvents {
             }
         }
 
-        protected abstract class CoroutineWrapper : CachedData<IEnumerator>, IValueReturner<IEnumerator>, ICoroutineStarter {
+        protected abstract class CoroutineWrapper : CachedData<IEnumerator>, IValueReturner<IEnumerator>, ICachedMethod, ICoroutineStarter {
             #region Fields
 
             protected CachedData _method;
@@ -738,6 +730,8 @@ namespace ExtendedEvents {
                 _method = method;
                 _parentReference = parentCaster;
             }
+
+            public override Type ReturnType => typeof(IEnumerator);
 
             public override MethodInfo GetMethodInfo() => _method.GetMethodInfo();
 
@@ -770,8 +764,6 @@ namespace ExtendedEvents {
 
                 _methodIsCoroutine = method.ReturnType == typeof(IEnumerator);
             }
-
-            public override Type ReturnType => typeof(IEnumerator);
 
             public override IEnumerator GetValue() => DelayedInvoke();
 
@@ -850,11 +842,11 @@ namespace ExtendedEvents {
                 throw new NotImplementedException();
             }
 
-            public override void Invoke<TArg>(TArg eventArg) {
+            public override void Invoke() {
                 throw new NotImplementedException();
             }
 
-            public override void Invoke() {
+            public override void Invoke<TArg>(TArg eventArg) {
                 throw new NotImplementedException();
             }
 
@@ -1366,10 +1358,6 @@ arg8.GetValue(eventArg));
                 return null;
             }
 
-            public override void Invoke() {
-                throw new NotImplementedException();
-            }
-
             public override MethodInfo GetMethodInfo() {
                 throw new NotImplementedException();
             }
@@ -1387,6 +1375,10 @@ arg8.GetValue(eventArg));
             }
 
             public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
                 throw new NotImplementedException();
             }
 
@@ -2795,10 +2787,6 @@ arg8.GetValue(eventArg));
                 throw new NotImplementedException();
             }
 
-            public override void Invoke() {
-                throw new NotImplementedException();
-            }
-
             public override T GetValue() {
 #if UNITY_EDITOR
                 Debug.LogError("No custom argument was provided");
@@ -2813,6 +2801,10 @@ arg8.GetValue(eventArg));
             public override T GetValue<TArg>(TArg eventArg) => TypeCaster<TArg, T>.Cast(eventArg);
 
             public override T1 GetValue<TArg, T1>(TArg eventArg) {
+                throw new NotImplementedException();
+            }
+
+            public override void Invoke() {
                 throw new NotImplementedException();
             }
 
