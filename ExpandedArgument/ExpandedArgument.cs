@@ -10,12 +10,21 @@ namespace ExtendedEvents {
         #region Fields
 
         /// <summary>Gradient argument</summary>
-        [SerializeField] [GradientUsage(true)] private Gradient _gradientArgument;
+        [SerializeField][GradientUsage(true)] private Gradient _gradientArgument;
 
         /// <summary>AnimationCurve argument</summary>
         [SerializeField] private AnimationCurve _animationCurveArgument;
 
         #endregion
+
+        public ExpandedArgument() : base() { }
+
+        /// <summary>Creates a clone of the original argument</summary>
+        public ExpandedArgument(ExpandedArgument original) : base(original) {
+            this._animationCurveArgument = original._animationCurveArgument;
+            this._gradientArgument = original._gradientArgument;
+        }
+
 
         /// <summary>
         /// This method will be used by ExtendedEvent to get serialized <see cref="AnimationCurve"/> argument. 

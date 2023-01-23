@@ -55,10 +55,6 @@ namespace ExtendedEvents {
 
         protected virtual bool isCachedArgument => false;
 
-        private interface ICachedDataID {
-            CachedData GetEndData();
-        }
-
         public static Type GetCachedDataType(string methodName) => GetActivator(methodName)?.GetType();
 
         public static MethodInfo GetMethodInfo(string methodName) => GetActivator(methodName)?.GetMethodInfo();
@@ -115,17 +111,25 @@ namespace ExtendedEvents {
             return ci.Invoke(new object[] { value }) as CachedData;
         }
 
-        protected static void UpdateReference(ref CachedData arg) {
-            if (arg is ICachedDataID idReference) {
-                arg = idReference.GetEndData();
-            }
-        }
-
         protected static void UpdateReference<T>(ref CachedData<T> arg) {
             if (arg is CachedDataID<T> idReference) {
                 arg = idReference.GetEndData();
             }
         }
+
+        public static CachedData GetCachedData(Action method) {
+            CachedAction data = new CachedAction();
+            data.SetDelegate(method);
+            return data;
+        }
+        public static CachedData GetCachedData<T>(Action<T> method) {
+            CachedAction<T> data = new CachedAction<T>();
+            data.SetDelegate(method);
+            data.SetArgument(new EventArgReference<T>());
+            return data;
+        }
+
+
 
         private static CachedData GetActivator(string methodName) {
             CachedData activator;
@@ -280,13 +284,13 @@ namespace ExtendedEvents {
                 //setup each argument
                 Type[] parameterTypes = activator.GetArgumentTypes();
 
-                if (call.arguments.Length != parameterTypes.Length) {
+                if (call.argumentCount != parameterTypes.Length) {
                     return null;
                 }
 
-                for (int i = 0; i < call.arguments.Length; i++) {
-                    CachedData argData = GetEndData(call.arguments[i], parameterTypes[i], parentReference, orderedCalls, runtimeReferences);
-                    if (call.arguments[i].isReferencable) {
+                for (int i = 0; i < call.argumentCount; i++) {
+                    CachedData argData = GetEndData(call.GetArgumentAt(i), parameterTypes[i], parentReference, orderedCalls, runtimeReferences);
+                    if (call.GetArgumentAt(i).isReferencable) {
                         runtimeReferences.Add(GetArgumentID(call.id, i), argData);
                     }
                     CallArrayBuilder[i] = argData;
@@ -297,9 +301,10 @@ namespace ExtendedEvents {
                 return callData;
             }
             else {
-                if (call.arguments.Length > 0 && call.arguments[0].isReferencable) {
-                    CachedData argumentData = GetEndData(call.arguments[0], activator.ReturnType, parentReference, orderedCalls, runtimeReferences);
+                if (call.argumentCount > 0 && call.GetArgumentAt(0).isReferencable) {
+                    CachedData argumentData = GetEndData(call.GetArgumentAt(0), activator.ReturnType, parentReference, orderedCalls, runtimeReferences);
                     runtimeReferences.Add(call.id, argumentData);
+                    runtimeReferences.Add(GetArgumentID(call.id, 0), argumentData);
                     return argumentData;
                 }
                 else {
@@ -455,9 +460,15 @@ namespace ExtendedEvents {
         public abstract void Invoke<TArg>(TArg eventArg);
 
         public virtual void SetValue<T>(T value) {
+#if UNITY_EDITOR
+            Debug.LogError($"Method {GetType()} does not store a value");
+#endif
         }
 
         public virtual void StopCoroutine() {
+#if UNITY_EDITOR
+            Debug.LogError($"Method {GetType()} does not start a coroutine");
+#endif
         }
 
         protected virtual Type[] GetArgumentTypes() {
@@ -514,7 +525,7 @@ namespace ExtendedEvents {
             return newInstance;
         }
 
-        protected abstract class CachedActionBase<TDelegate> : CachedMethod<TDelegate, Void>, ICachedMethod<TDelegate> where TDelegate : Delegate {
+        protected abstract class CachedActionBase<TDelegate> : CachedMethod<TDelegate, Void> where TDelegate : Delegate {
             public override Type ReturnType => typeof(void);
 
             public override Void GetValue() {
@@ -552,7 +563,7 @@ namespace ExtendedEvents {
             protected override CachedData<TDesired> GetCachedDataUnderlying<TDesired>() => GetCachedDataMethod<CachedActionBase<TDelegate>, Void, TDesired>(this);
         }
 
-        protected abstract class CachedFuncBase<TDelegate, TResult> : CachedMethod<TDelegate, TResult>, ICachedMethod<TDelegate>, IValueReturner<TResult> where TDelegate : Delegate {
+        protected abstract class CachedFuncBase<TDelegate, TResult> : CachedMethod<TDelegate, TResult>, IValueReturner<TResult> where TDelegate : Delegate {
             public override Type ReturnType => typeof(TResult);
 
             public override T GetValue<T>() {
@@ -573,7 +584,7 @@ namespace ExtendedEvents {
         /// <summary>
         /// Base class for any method in <see cref="ExtendedEvent"/>.
         /// </summary>
-        protected abstract class CachedMethod<TDelegate, TResult> : CachedData<TResult> where TDelegate : Delegate {
+        protected abstract class CachedMethod<TDelegate, TResult> : CachedData<TResult>, IDelegate<TDelegate>, IMethod where TDelegate : Delegate {
             #region Fields
 
             protected TDelegate method;
@@ -582,14 +593,14 @@ namespace ExtendedEvents {
 
             #endregion
 
-            public TDelegate GetMethod() => method;
+            public TDelegate GetDelegate() => method;
 
             public override MethodInfo GetMethodInfo() => method.Method;
 
             /// <summary>
             /// Use this method to set delegate during runtime.
             /// </summary>
-            public void SetMethod(TDelegate method) => this.method = method;
+            public void SetDelegate(TDelegate method) => this.method = method;
 
             protected abstract CachedMethod<TDelegate, TResult> CreateInstance();
 
@@ -715,7 +726,7 @@ namespace ExtendedEvents {
             }
         }
 
-        protected abstract class CoroutineWrapper : CachedData<IEnumerator>, IValueReturner<IEnumerator>, ICachedMethod, ICoroutineStarter {
+        protected abstract class CoroutineWrapper : CachedData<IEnumerator>, IValueReturner<IEnumerator>, IMethod, ICoroutineStarter {
             #region Fields
 
             protected CachedData _method;
@@ -904,6 +915,9 @@ value);
 
             protected override CachedMethod<Action<T>, Void> CreateInstance() => new CachedAction<T>();
 
+            public void SetArgument(CachedData<T> arg) {
+                this.arg = arg;
+            }
             protected override void SetArguments(CachedData[] arguments) {
                 arg = arguments[0]?.GetCachedData<T>();
             }
@@ -1335,7 +1349,7 @@ arg8.GetValue(eventArg));
             protected override void UpdateReferences(Dictionary<int, CachedData> runtimeReferences) => _method.UpdateReferences(runtimeReferences);
         }
 
-        private class CachedDataID<T> : CachedData<T>, ICachedDataID {
+        private class CachedDataID<T> : CachedData<T> {
             #region Fields
 
             private int id;
@@ -1396,12 +1410,6 @@ arg8.GetValue(eventArg));
                 throw new NotImplementedException();
             }
 
-            CachedData ICachedDataID.GetEndData() {
-                if (runtimeReferences.TryGetValue(id, out CachedData data)) {
-                    return data;
-                }
-                return null;
-            }
         }
 
         private class CachedFunc<TResult> : CachedFuncBase<Func<TResult>, TResult> {

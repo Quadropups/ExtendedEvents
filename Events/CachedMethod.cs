@@ -10,22 +10,22 @@ namespace ExtendedEvents {
         void SetValue(T value);
     }
 
-    public interface ICachedMethod {
+    public interface ICoroutineStarter {
+        void StopCoroutine();
+    }
+
+    public interface IDelegate<TDelegate> where TDelegate : Delegate {
+        TDelegate GetDelegate();
+
+        void SetDelegate(TDelegate method);
+    }
+
+    public interface IMethod {
         MethodInfo GetMethodInfo();
 
         void Invoke();
 
         void Invoke<TArg>(TArg eventArg);
-    }
-
-    public interface ICachedMethod<TDelegate> : ICachedMethod where TDelegate : Delegate {
-        TDelegate GetMethod();
-
-        void SetMethod(TDelegate method);
-    }
-
-    public interface ICoroutineStarter {
-        void StopCoroutine();
     }
 
     public interface IValueReturner {

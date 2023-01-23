@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
+using System;
+using ExtendedEvents;
 
 /// This is a partial class so that the user could define casters in their own script
 public static partial class GlobalTypeCasters {
@@ -45,4 +47,15 @@ public static partial class GlobalTypeCasters {
 
     #endregion
 
+    #region CachedData
+
+    public static Action GetActionDelegate(CachedData data) => data.Invoke;
+
+    public static Action<TArg> GetActionDelegate<TArg>(CachedData data) => data.Invoke<TArg>;
+
+    public static Func<TResult> GetFuncDelegate<TResult>(CachedData data) => data.GetValue<TResult>;
+
+    public static Func<TArg, TResult> GetFuncDelegate<TArg, TResult>(CachedData data) => data.GetValue<TArg, TResult>;
+
+    #endregion
 }

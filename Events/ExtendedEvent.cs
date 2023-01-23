@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using UnityEditor.Timeline.Actions;
 using UnityEngine;
 
 namespace ExtendedEvents {
@@ -432,7 +433,9 @@ namespace ExtendedEvents {
 
             public override void Invoke() {
                 _coroutine = events.parent.StartCoroutine(events.InvokeCoroutine(calls, range.start, range.length));
-                InvokeDelegates();
+            }
+            public override void Invoke<TArg>(TArg eventArg) {
+                _coroutine = events.parent.StartCoroutine(events.InvokeCoroutine(calls, range.start, range.length, eventArg));
             }
 
             public override void StopCoroutine() {
@@ -440,43 +443,29 @@ namespace ExtendedEvents {
             }
         }
 
-        protected class DelayedInvokerInternal<TArg> : InvokerInternal<TArg>, ICoroutineStarter {
-            #region Fields
-
-            private readonly ExtendedEvent events;
-
-            private Coroutine _coroutine;
-
-            #endregion
-
-            public DelayedInvokerInternal(ExtendedEvent events, CachedData[] calls, RangeInt range) : base(calls, range) {
-                this.events = events;
-            }
-
-            public override void Invoke(TArg eventArg) {
-                _coroutine = events.parent.StartCoroutine(events.InvokeCoroutine(calls, range.start, range.length, eventArg));
-                InvokeDelegates(eventArg);
-            }
-
-            public override void StopCoroutine() {
-                events.parent.StopCoroutine(_coroutine);
-            }
-        }
-
         protected class EmptyInvoker : Invoker {
-            public override void Invoke() => InvokeDelegates();
-        }
+            private CombinedData combinedData = new CombinedData();
 
-        protected class EmptyInvoker<TArg> : Invoker<TArg> {
-            public override void Invoke(TArg eventArg) {
-                InvokeDelegates(eventArg);
-            }
+            public override IEnumerable<CachedData> GetCalls() => Array.Empty<CachedData>();
+
+            public override IEnumerable<T> GetValues<T>() => Array.Empty<T>();
+
+            public override IEnumerable<T> GetValues<TArg, T>(TArg eventArg) => Array.Empty<T>();
+
+            public override void Invoke() => combinedData.Invoke();
+
+            public override void Invoke<TArg>(TArg eventArg) => combinedData.Invoke(eventArg);
+
+            public override void Add(Action value) => combinedData.Add(value);
+            public override void Add<T>(Action<T> value) => combinedData.Add(value);
+            public override void Remove(Action value) => combinedData.Remove(value);
+            public override void Remove<T>(Action<T> value) => combinedData.Remove(value);
         }
 
         protected class InvokerInternal : Invoker {
             #region Fields
 
-            protected readonly RangeInt range;
+            protected RangeInt range;
 
             protected CachedData[] calls;
 
@@ -500,47 +489,46 @@ namespace ExtendedEvents {
                 }
             }
 
-            public override void Invoke() {
-                for (int i = range.start; i < range.end; i++) {
-                    calls[i].Invoke();
-                }
-                InvokeDelegates();
-            }
-        }
-
-        protected class InvokerInternal<TArg> : Invoker<TArg> {
-            #region Fields
-
-            protected readonly RangeInt range;
-
-            protected CachedData[] calls;
-
-            #endregion
-
-            public InvokerInternal(CachedData[] calls, RangeInt range) {
-                this.calls = calls;
-                this.range = range;
-            }
-
-            public override IEnumerable<CachedData> GetCalls() {
-                for (int i = range.start; i < range.end; i++) {
-                    yield return calls[i];
-                }
-            }
-
-            public override IEnumerable<T> GetValues<T>(TArg eventArg) {
+            public override IEnumerable<T> GetValues<TArg, T>(TArg eventArg) {
                 for (int i = range.start; i < range.end; i++) {
                     CachedData call = calls[i];
                     yield return call.GetValue<TArg, T>(eventArg);
                 }
             }
 
-            public override void Invoke(TArg eventArg) {
+            public override void Invoke() {
+                for (int i = range.start; i < range.end; i++) {
+                    calls[i].Invoke();
+                }
+            }
+
+            public override void Invoke<TArg>(TArg eventArg) {
                 for (int i = range.start; i < range.end; i++) {
                     calls[i].Invoke(eventArg);
                 }
-                InvokeDelegates(eventArg);
             }
+
+            private CombinedData combinedData {
+                get {
+                    if (calls[range.end - 1] is CombinedData data) {
+                        return data;
+                    }
+                    CachedData[] newCalls = new CachedData[range.length + 1];
+                    for (int i = 0; i < newCalls.Length - 1; i++) {
+                        newCalls[i] = calls[range.start + i];
+                    }
+                    data = new CombinedData();
+                    newCalls[newCalls.Length - 1] = data;
+                    calls = newCalls;
+                    range = new RangeInt(0, newCalls.Length);
+                    return data;
+                }
+            }
+
+            public override void Add(Action value) => combinedData.Add(value);
+            public override void Add<T>(Action<T> value) => combinedData.Add(value);
+            public override void Remove(Action value) => combinedData.Remove(value);
+            public override void Remove<T>(Action<T> value) => combinedData.Remove(value);
         }
 
         /// <summary>Represents non-generic open constructed type (such as generic array)</summary>
@@ -576,11 +564,11 @@ namespace ExtendedEvents {
 
         protected EventCall<TTag>[] _orderedCalls;
 
-        protected Dictionary<TTag, InvokerBase> _invokers;
+        protected Dictionary<TTag, Invoker> _invokers;
 
         #endregion
 
-        private Dictionary<TTag, InvokerBase> invokers {
+        private Dictionary<TTag, Invoker> invokers {
             get {
                 if (needSetup) Setup();
                 return _invokers;
@@ -600,14 +588,11 @@ namespace ExtendedEvents {
             return count;
         }
 
-        public void Add(TTag tag, Action del) => GetInvoker(tag).del += del;
+        public void Add(TTag tag, Action del) => GetInvoker(tag).Add(del);
 
-        public void Add<TArg>(TTag tag, Action<TArg> del) => GetInvoker<TArg>(tag).del += del;
+        public void Add<TArg>(TTag tag, Action<TArg> del) => GetInvoker(tag).Add(del);
 
-        public IEnumerable<CachedData> GetCalls(TTag tag) {
-            if (needSetup) Setup();
-            return GetInvokerInternal<Void>(tag)?.GetCalls() ?? Array.Empty<CachedData>();
-        }
+        public IEnumerable<CachedData> GetCalls(TTag tag) => GetInvoker(tag).GetCalls();
 
         public CachedData GetData(TTag tag) {
             for (int i = 0; i < _orderedCalls.Length; i++) {
@@ -621,76 +606,13 @@ namespace ExtendedEvents {
 
         /// <summary>Will get invoker with specified tag. If none exists new will be created</summary>
         public Invoker GetInvoker(TTag tag) {
-            if (TryGetInvoker<Invoker, Void>(tag, out InvokerBase invoker)) return invoker as Invoker;
-            Invoker newInvoker = new EmptyInvoker();
-            invokers[tag] = newInvoker;
-            return newInvoker;
+            if (invokers.TryGetValue(tag, out Invoker invoker)) return invoker;
+            invoker = new EmptyInvoker();
+            invokers[tag] = invoker;
+            return invoker;
         }
 
-        /// <summary>Will get invoker with specified tag that takes parameter of TArg type. If none exists new will be created</summary>
-        public Invoker<TArg> GetInvoker<TArg>(TTag tag) {
-            if (TryGetInvoker<Invoker<TArg>, TArg>(tag, out InvokerBase invoker)) return invoker as Invoker<TArg>;
-            Invoker<TArg> newInvoker = new EmptyInvoker<TArg>();
-            invokers[tag] = newInvoker;
-            return newInvoker;
-        }
-
-        public new EventCall<TTag>[] GetSerializedCalls() => serializedCalls as EventCall<TTag>[];
-
-        public IEnumerable<KeyValuePair<TTag, InvokerBase>> GetTagInvokers() {
-            if (TagIsIComparable) return invokers.OrderBy(pair => pair.Key);
-            else return invokers.OrderBy(pair => pair.Key.GetHashCode());
-        }
-
-        public TValue GetValue<TValue>(TTag tag) {
-            CachedData data = GetData<Invoker, Void>(tag);
-            if (data != null) return data.GetValue<TValue>();
-            return default;
-        }
-
-        public TValue GetValue<TValue, TArg>(TTag tag, TArg eventArg) {
-            CachedData data = GetData<Invoker<TArg>, TArg>(tag);
-            if (data != null) return data.GetValue<TArg, TValue>(eventArg);
-            return default;
-        }
-
-        public IEnumerable<TValue> GetValues<TValue>(TTag tag) {
-            if (TryGetInvoker<Invoker, Void>(tag, out InvokerBase invoker)) return ((Invoker)invoker).GetValues<TValue>();
-            return Array.Empty<TValue>();
-        }
-
-        public IEnumerable<TValue> GetValues<TValue, TArg>(TTag tag, TArg eventArg) {
-            if (TryGetInvoker<Invoker<TArg>, TArg>(tag, out InvokerBase invoker)) return ((Invoker<TArg>)invoker).GetValues<TValue>(eventArg);
-            return Array.Empty<TValue>();
-        }
-
-        public bool HasEventsWithTag(TTag tag) => invokers.ContainsKey(tag);
-
-        public void Invoke(TTag tag) {
-            if (TryGetInvoker<Invoker, Void>(tag, out InvokerBase invoker)) ((Invoker)invoker).Invoke();
-        }
-
-        public void Invoke<TArg>(TTag tag, TArg eventArg) {
-            if (TryGetInvoker<Invoker<TArg>, TArg>(tag, out InvokerBase invoker)) ((Invoker<TArg>)invoker).Invoke(eventArg);
-        }
-
-        public void Remove(TTag tag, Action del) => GetInvoker(tag).del -= del;
-
-        public void Remove<TArg>(TTag tag, Action<TArg> del) => GetInvoker<TArg>(tag).del -= del;
-
-        /// <summary>Stops coroutine with specified tag for current event</summary>
-        public void StopCoroutine(TTag tag) {
-            if (invokers.TryGetValue(tag, out InvokerBase invoker)) {
-                invoker.StopCoroutine();
-            }
-        }
-
-        private CachedData GetData<TInvoker, TArg>(TTag tag) where TInvoker : InvokerBase {
-            if (TryGetInvoker<TInvoker, TArg>(tag, out InvokerBase invokerBase)) return invokerBase.GetCalls().First();
-            return null;
-        }
-
-        private InvokerBase GetInvokerInternal<TArg>(TTag tag) {
+        private Invoker GetInvokerInternal(TTag tag) {
             IEquatable<TTag> tagE = tag as IEquatable<TTag>;
 
             int index = 0;
@@ -713,32 +635,65 @@ namespace ExtendedEvents {
             RangeInt range = new RangeInt(index, count);
 
             if (pausable) {
-                if (typeof(TArg) == typeof(Void)) return new DelayedInvokerInternal(this, _runtimeCalls, range);
-                return new DelayedInvokerInternal<TArg>(this, _runtimeCalls, range);
+                return new DelayedInvokerInternal(this, _runtimeCalls, range);
             }
             else {
-                if (typeof(TArg) == typeof(Void)) return new InvokerInternal(_runtimeCalls, range);
-                return new InvokerInternal<TArg>(_runtimeCalls, range);
+                return new InvokerInternal(_runtimeCalls, range);
             }
         }
 
-        /// <summary>Will try to get invoker with specified tag</summary>
-        private bool TryGetInvoker<TInvoker, TArg>(TTag tag, out InvokerBase invoker) where TInvoker : InvokerBase {
-            bool exists = invokers.TryGetValue(tag, out InvokerBase invokerBase);
-            if (exists) {
-                invoker = invokerBase as TInvoker;
-                if (invoker == null) {
-#if UNITY_EDITOR
-                    Debug.LogError($"Can't add {typeof(TInvoker)} to dictionary because it already contains {invokerBase.GetType()}. This invoker won't be called on events' Invoke call");
-#endif
-                    invoker = GetInvokerInternal<TArg>(tag) as TInvoker;
-                }
-                return true;
+        protected void SetupSerializedInvokers() {
+            _invokers = new Dictionary<TTag, Invoker>();
+
+            foreach (TTag tag in _orderedCalls.Select(t => t.tag).Distinct()) {
+                invokers[tag] = GetInvokerInternal(tag);
             }
-            invoker = GetInvokerInternal<TArg>(tag);
-            if (invoker != null) _invokers[tag] = invoker;
-            return invoker != null;
         }
+
+
+        public new EventCall<TTag>[] GetSerializedCalls() => serializedCalls as EventCall<TTag>[];
+
+        public IEnumerable<KeyValuePair<TTag, Invoker>> GetTagInvokers() {
+            if (TagIsIComparable) return invokers.OrderBy(pair => pair.Key);
+            else return invokers.OrderBy(pair => pair.Key.GetHashCode());
+        }
+
+        public TValue GetValue<TValue>(TTag tag) {
+            CachedData data = GetData(tag);
+            if (data != null) return data.GetValue<TValue>();
+            return default;
+        }
+
+        public TValue GetValue<TValue, TArg>(TTag tag, TArg eventArg) {
+            CachedData data = GetData(tag);
+            if (data != null) return data.GetValue<TArg, TValue>(eventArg);
+            return default;
+        }
+
+        public IEnumerable<TValue> GetValues<TValue>(TTag tag) => GetInvoker(tag).GetValues<TValue>();
+
+        public IEnumerable<TValue> GetValues<TValue, TArg>(TTag tag, TArg eventArg) => GetInvoker(tag).GetValues<TArg, TValue>(eventArg);
+
+        public bool HasEventsWithTag(TTag tag) => invokers.ContainsKey(tag);
+
+        public void Invoke(TTag tag) => GetInvoker(tag).Invoke();
+
+        public void Invoke<TArg>(TTag tag, TArg eventArg) => GetInvoker(tag).Invoke(eventArg);
+
+        public void Remove(TTag tag, Action del) => GetInvoker(tag).Remove(del);
+
+        public void Remove<TArg>(TTag tag, Action<TArg> del) => GetInvoker(tag).Remove(del);
+
+        /// <summary>Stops coroutine with specified tag for current event</summary>
+        public void StopCoroutine(TTag tag) {
+            if (invokers.TryGetValue(tag, out Invoker invoker)) {
+                invoker.StopCoroutine();
+            }
+        }
+
+
+
+
 
         private class Void {
         }
@@ -778,7 +733,7 @@ namespace ExtendedEvents {
 
             CachedData.SetupCalls(_parent, _orderedCalls, out _runtimeCalls, out _dataReferences);
 
-            _invokers = new Dictionary<TTag, InvokerBase>();
+            SetupSerializedInvokers();
         }
     }
 }

@@ -76,6 +76,7 @@ namespace ExtendedEvents {
         private static GUIStyle ButtonLeft = MakeButtonLeftStyle();
 
         private static string ExposedTypePath = null;
+        private static int ExposedTypeInt = 0;
 
         private static string ExposedMethodSignaturePath = null;
 
@@ -113,7 +114,15 @@ namespace ExtendedEvents {
 
         private static Action<ArgumentDrawer, MethodInfo, ParameterInfo, Type, Attribute> ArgumentDrawerSetupDelegate = MakeArgumentDrawerSetupDelegate();
 
-        private static GUIContent CustomEventArg = new GUIContent("Event arg", "Custom event argument");
+        private static GUIContent CustomEventArgGUIContent = new GUIContent("Custom event argument", "Custom event argument");
+        private static GUIStyle CustomEventArgGUIStype = MakeCustomEventArgGUIStype();
+
+        private static GUIStyle MakeCustomEventArgGUIStype() {
+            var style = new GUIStyle(EditorStyles.label);
+            style.normal.textColor = new Color(0.6f, 0.6f, 1);
+            return style;
+        }
+
 
         private ExtendedEventAttribute settings = new ExtendedEventAttribute();
 
@@ -144,11 +153,13 @@ namespace ExtendedEvents {
 
         public ExtendedEventDrawer() {
             ExposedTypePath = null;
+            ExposedTypeInt = 0;
             ExposedMethodSignaturePath = null;
         }
 
         public ExtendedEventDrawer(Type tagType, Type argumentType) {
             ExposedTypePath = null;
+            ExposedTypeInt = 0;
             ExposedMethodSignaturePath = null;
 
             _TagType = tagType;
@@ -569,9 +580,14 @@ namespace ExtendedEvents {
             args.Append(")");
 
             var returnType = mi.ReturnType;
-            string returnTypeName = returnType != typeof(void) ? $"{GetDisplayTypeName(returnType)} " : null;
 
-            return $"{returnTypeName}{methodName}{args}";
+            if (returnType == typeof(void)) {
+                return $"{methodName}{args}";
+            }
+            else {
+                string returnTypeName = $" => {GetDisplayTypeName(returnType)}";
+                return $"{methodName}{args}{returnTypeName}";
+            }
         }
 
         public static string GetDisplayTypeName(Type t) {
@@ -1024,7 +1040,7 @@ namespace ExtendedEvents {
         public static void TypeField(Rect position, SerializedProperty property, GUIContent label) {
             Rect labelRect = DivideRect(ref position, EditorGUIUtility.labelWidth, position.width - EditorGUIUtility.labelWidth, true);
             EditorGUI.LabelField(labelRect, label);
-            DrawTypeSelector(position, property, ExtendedEvent.GetType(property.stringValue), property.stringValue, SetTypeValue);
+            DrawTypeSelector(position, property, GetTypeCache(ExtendedEvent.GetType(property.stringValue)), property.stringValue, SetTypeValue, -1);
         }
 
         private static void CallArgumentOperation(object data) {
@@ -1111,15 +1127,17 @@ namespace ExtendedEvents {
             }
         }
 
-        private static void DrawTypeSelector(Rect propertyRect, SerializedProperty property, Type reflectedType, string reflectedTypeName, GenericMenu.MenuFunction2 func) {
+        private static void DrawTypeSelector(Rect propertyRect, SerializedProperty property, TypeCache type, string typeName, GenericMenu.MenuFunction2 func, int expType) {
             Color backgroundColor = GUI.backgroundColor;
 
-            GUI.backgroundColor = (reflectedType != null || string.IsNullOrEmpty(property.stringValue)) ? backgroundColor : ColorError;
+            GUI.backgroundColor = (type != null || string.IsNullOrEmpty(property.stringValue)) ? backgroundColor : ColorError;
 
-            if (ExposedTypePath == null || ExposedTypePath != property.propertyPath) {
-                if (GUI.Button(propertyRect, new GUIContent(reflectedType != null ? reflectedTypeName : (string.IsNullOrEmpty(reflectedTypeName) ? "Type" : $"<{reflectedTypeName}>"), reflectedTypeName), ButtonLeft)) {
+            if (ExposedTypePath == null || ExposedTypePath != property.propertyPath || expType != ExposedTypeInt) {
+                GUIContent buttonContent = type != null ? type.Label : new GUIContent(string.IsNullOrEmpty(typeName) ? "Type" : $"<{typeName}>", typeName + " ");
+                if (GUI.Button(propertyRect, buttonContent, ButtonLeft)) {
                     ExposedTypePath = property.propertyPath;
-                    CurrentTypeName = reflectedTypeName;
+                    ExposedTypeInt = expType;
+                    CurrentTypeName = typeName;
                 }
             }
             else {
@@ -1145,7 +1163,7 @@ namespace ExtendedEvents {
                                     selectTypeMenu.AddSeparator("");
                                     addSeparator = false;
                                 }
-                                selectTypeMenu.AddItem(new GUIContent(t), t == reflectedTypeName, func, new PropertyValue<string>(property, t));
+                                selectTypeMenu.AddItem(new GUIContent(t), t == typeName, func, new PropertyValue<string>(property, t));
                                 maxCount--;
                                 if (maxCount <= 0) {
                                     Debug.LogWarning("Too many matches, try better specify type name");
@@ -1157,6 +1175,7 @@ namespace ExtendedEvents {
                     }
                     else {
                         ExposedTypePath = null;
+                        ExposedTypeInt = 0;
                         CurrentTypeName = "";
                     }
 
@@ -1174,20 +1193,22 @@ namespace ExtendedEvents {
 
 
 
-        private static MethodCache FindMethod(string methodSignature) {
+        private static MethodCache FindMethod(string methodSignature, MethodInfo method) {
             MethodCache cache;
             if (CachedReflection.TryGetValue(methodSignature, out cache)) return cache;
             else {
                 Type cachedDataType = CachedData.GetCachedDataType(methodSignature);
                 if (cachedDataType == null) {
-                    cache = null;
+                    if (method == null) {
+                        return null;
+                    }
+                    cache = new MethodCache(method);
                 }
-                else if(cachedDataType.Name.StartsWith("CachedArgument")) {
+                else if (cachedDataType.Name.StartsWith("CachedArgument")) {
                     cache = new MethodCache(ExtendedEvent.GetType(methodSignature));
                 }
                 else {
-                    MethodInfo method = CachedData.GetMethodInfo(methodSignature);
-                    cache = new MethodCache(method);
+                    cache = new MethodCache(CachedData.GetMethodInfo(methodSignature));
                 }
                 CachedReflection.Add(methodSignature, cache);
                 return cache;
@@ -1195,11 +1216,11 @@ namespace ExtendedEvents {
         }
 
         private static MethodCache FindArgumentFunc(SerializedProperty argument) {
-            return FindMethod(argument.FindPropertyRelative(StringArgumentFieldName).stringValue);
+            return FindMethod(argument.FindPropertyRelative(StringArgumentFieldName).stringValue, null);
         }
 
         private static MethodCache FindMethod(SerializedProperty call) {
-            return FindMethod(call.FindPropertyRelative(MethodNameFieldName).stringValue);
+            return FindMethod(call.FindPropertyRelative(MethodNameFieldName).stringValue, null);
         }
 
 
@@ -1831,7 +1852,50 @@ namespace ExtendedEvents {
             methodName.serializedObject.ApplyModifiedProperties();
 
             ExposedTypePath = null;
+            ExposedTypeInt = 0;
         }
+
+        private static GenericMenu.MenuFunction2[] SetGenericArgumentValueDelegates = new GenericMenu.MenuFunction2[] {
+        (p) => SetGenericArgumentValue(p, 0),
+        (p) => SetGenericArgumentValue(p, 1),
+        (p) => SetGenericArgumentValue(p, 2),
+        (p) => SetGenericArgumentValue(p, 3),
+        (p) => SetGenericArgumentValue(p, 4),
+        (p) => SetGenericArgumentValue(p, 5),
+        (p) => SetGenericArgumentValue(p, 6),
+        (p) => SetGenericArgumentValue(p, 7),
+    };
+
+        private static void SetGenericArgumentValue(object source, int index) {
+            SerializedProperty methodName = ((PropertyValue<string>)source).property;
+            string value = ((PropertyValue<string>)source).value;
+
+            MethodCache method = FindMethod(methodName.stringValue, null);
+            TypeCache[] genericArguments = method.GetGenericArguments().ToArray();
+            genericArguments[index] = GetTypeCache(ExtendedEvent.GetType(value)) ?? genericArguments[index];
+
+            MethodInfo newMethod = method.method.GetGenericMethodDefinition().MakeGenericMethod(genericArguments.Select(t => t.type).ToArray());
+            if (newMethod != null) {
+                methodName.stringValue = GetSerializableMethodName(newMethod);
+                methodName.serializedObject.ApplyModifiedProperties();
+                FindMethod(GetSerializableMethodName(newMethod), newMethod);
+            }
+            else {
+                StringBuilder sb = new StringBuilder(methodName.stringValue);
+                sb.Append("Can't create generic method:");
+                sb.Append(method.method.Name);
+                sb.Append(" and generic arguments");
+                for (int i = 0; i < genericArguments.Length; i++) {
+                    sb.Append(genericArguments[i].DisplayName);
+                    sb.Append(", ");
+                }
+                Debug.LogError(sb.ToString());
+            }
+
+            ExposedTypePath = null;
+            ExposedTypeInt = 0;
+        }
+
 
         private static void SetTypeValue(object source) {
             SerializedProperty typeField = ((PropertyValue<string>)source).property;
@@ -1842,6 +1906,7 @@ namespace ExtendedEvents {
             typeField.serializedObject.ApplyModifiedProperties();
 
             ExposedTypePath = null;
+            ExposedTypeInt = 0;
         }
 
         private static void StringField(Rect position, GUIContent label, SerializedProperty property) {
@@ -2799,8 +2864,7 @@ namespace ExtendedEvents {
         private void DrawCustomEventArgsField(Rect position, GUIContent label) {
             EditorGUIUtility.labelWidth = GetLabelWidth(position);
             DrawLabel(ref position, label);
-            EditorGUIUtility.DrawColorSwatch(position, new Color(0.7f, 0.7f, 1));
-            EditorGUI.LabelField(position, CustomEventArg);
+            EditorGUI.LabelField(position, CustomEventArgGUIContent, CustomEventArgGUIStype);
         }
 
         private void DrawEndArgument(Rect position, SerializedProperty property, GUIContent label, ParameterCache parameterInfo, Type parameterType, bool allowDrawer) {
@@ -3104,7 +3168,7 @@ namespace ExtendedEvents {
 
             EditorGUI.BeginProperty(propertyRect, GUIContent.none, methodSignature);
 
-            MethodCache method = FindMethod(methodSignature.stringValue);
+            MethodCache method = FindMethod(methodSignature.stringValue, null);
 
             Type reflectedType;
             string reflectedTypeName;
@@ -3134,7 +3198,7 @@ namespace ExtendedEvents {
                     methodButtonContent = new GUIContent($"INVALID {methodButtonContent.text}", $"Method {method.DisplayName} contains ref or out parameters");
                     methodColor = ColorError;
                 }
-                else if (method.GetCustomAttribute<ObsoleteAttribute>() != null) {
+                else if (method.IsObsolete || method.ReflectedType.IsObsolete) {
                     methodButtonContent = new GUIContent($"[OBSOLETE] {methodButtonContent.text}", $"[OBSOLETE] {methodButtonContent.tooltip}");
                     methodColor = ColorError;
                 }
@@ -3211,7 +3275,7 @@ namespace ExtendedEvents {
             else {
                 if (!simplified) {
                     Rect reflectedTypeRect = DivideRect(ref propertyRect, 1, 4, true);
-                    DrawTypeSelector(reflectedTypeRect, methodSignature, reflectedType, reflectedTypeName, SetMethodReflectedTypeName);
+                    DrawTypeSelector(reflectedTypeRect, methodSignature, GetTypeCache(reflectedType), reflectedTypeName, SetMethodReflectedTypeName, -2);
                 }
 
                 GUI.backgroundColor = methodColor;
@@ -3222,6 +3286,27 @@ namespace ExtendedEvents {
                         BuildPopupList(target, reflectedType, property, desiredType, method, methodName).DropDown(propertyRect);
                     }
                 }
+
+                //draw generic types
+                if (!simplified && method != null && !method.IsValue) {
+                    if (method.IsGeneric) {
+                        TypeCache[] genericArguments = method.GetGenericArguments();
+
+                        float allWidth = propertyRect.width * 0.4f;
+
+                        for (int i = genericArguments.Length - 1; i >= 0; i--) {
+                            float singleWidth = allWidth / genericArguments.Length;
+                            Rect genericArgumentRect = DivideRect(ref propertyRect, propertyRect.width - singleWidth, singleWidth);
+                            TypeCache genericArgument = genericArguments[i];
+                            if (genericArgument.IsGenericParameter) {
+                                GUI.backgroundColor = ColorError;
+                            }
+                            DrawTypeSelector(genericArgumentRect, methodSignature, genericArgument, genericArgument.DisplayName, SetGenericArgumentValueDelegates[i], 1 + i);
+                            GUI.backgroundColor = methodColor;
+                        }
+                    }
+                }
+
 
                 if (GUI.Button(propertyRect, methodButtonContent, EditorStyles.popup)) {
                     BuildPopupList(target, reflectedType, property, desiredType, method, null).DropDown(propertyRect);
@@ -3288,7 +3373,7 @@ namespace ExtendedEvents {
             //check if there is a suggested method to replace this Obsolete method
             ObsoleteAttribute obsoleteAttribute = currentMethod?.GetCustomAttribute<ObsoleteAttribute>();
             if (obsoleteAttribute != null && !string.IsNullOrEmpty(obsoleteAttribute.Message)) {
-                MethodCache suggestedMethod = FindMethod(obsoleteAttribute.Message);
+                MethodCache suggestedMethod = FindMethod(obsoleteAttribute.Message, null);
                 if (suggestedMethod != null) {
                     var vmm = new ValidMethodMap();
                     vmm.target = target;
@@ -3549,7 +3634,7 @@ namespace ExtendedEvents {
 
                 SerializedProperty argumentArray = listener.FindPropertyRelative(ArgumentsFieldName);
 
-                MethodCache methodCache = FindMethod(GetSerializableMethodName(method));
+                MethodCache methodCache = FindMethod(GetSerializableMethodName(method), method);
                 TypeCache[] methodParameterTypes = methodCache.GetParameterTypes(true);
 
                 argumentArray.arraySize = methodParameterTypes.Length;
@@ -3613,7 +3698,7 @@ namespace ExtendedEvents {
 
                 //var argTypeProperty = argument.FindPropertyRelative(MethodDefitionFieldName);
 
-                MethodCache methodCache = FindMethod(GetSerializableMethodName(method));
+                MethodCache methodCache = FindMethod(GetSerializableMethodName(method), method);
                 ArgType arg0Type = GetFuncArgType(methodDefinition.intValue, 0);
 
                 if (methodCache.GetParameters(true).Length > 0 && arg0Type == ArgType.Data) {
@@ -3916,7 +4001,10 @@ namespace ExtendedEvents {
                 this.TypeEnum = GetTypeEnum(type);
                 this.Drawer = MakeDrawer(null, null, type);
 
+                this.IsGenericParameter = type.IsGenericParameter;
+
                 this.IsFlags = ((FlagsAttribute)Attribute.GetCustomAttribute(type, typeof(FlagsAttribute))) != null;
+                this.IsObsolete = ((ObsoleteAttribute)Attribute.GetCustomAttribute(type, typeof(ObsoleteAttribute))) != null;
 
                 this.DisplayName = GetDisplayTypeName(type);
                 this.SerializableTypeName = GetSerializableTypeName(type);
@@ -3924,9 +4012,13 @@ namespace ExtendedEvents {
 
             public string DisplayName { get; }
 
+            public bool IsGenericParameter { get; }
+
             public object Drawer { get; }
 
             public bool IsFlags { get; }
+
+            public bool IsObsolete { get; }
 
             public GUIContent Label { get; }
 
@@ -4113,6 +4205,8 @@ namespace ExtendedEvents {
 
             private TypeCache[] argumentParameterTypes;
 
+            private TypeCache[] genericArguments;
+
             private GUIContent[] parameterLabels;
 
             private Attribute[] attributes;
@@ -4122,6 +4216,8 @@ namespace ExtendedEvents {
             private void Setup(MethodInfo method) {
                 this.method = method;
                 IsStatic = method.IsStatic;
+                IsGeneric = method.IsGenericMethod;
+                IsObsolete = ((ObsoleteAttribute)Attribute.GetCustomAttribute(method, typeof(ObsoleteAttribute))) != null;
 
                 attributes = method.GetCustomAttributes(typeof(Attribute), true).
                     Union(GetDefiningProperty(method)?.GetCustomAttributes(typeof(Attribute), true) ?? Array.Empty<object>()).
@@ -4148,6 +4244,8 @@ namespace ExtendedEvents {
                     argumentParameters = list.ToArray();
                 }
 
+                genericArguments = method.GetGenericArguments().Select(t => new TypeCache(t)).ToArray();
+
                 parameterTypes = parameters.Select(p => p.ParameterType).ToArray();
                 argumentParameterTypes = argumentParameters.Select(p => p?.ParameterType ?? GetTypeCache(method.ReflectedType)).ToArray();
 
@@ -4171,6 +4269,8 @@ namespace ExtendedEvents {
                 MethodInfo method = ((Func<object, object>)GetValue).Method.GetGenericMethodDefinition().MakeGenericMethod(type);
                 Setup(method);
 
+                IsValue = true;
+
                 parameters[0].isDataParameter = true;
 
                 //parameters[0] = null;
@@ -4188,9 +4288,15 @@ namespace ExtendedEvents {
                 Setup(method);
             }
 
+            public bool IsValue { get; private set; }
+
             public string DisplayName { get; private set; }
 
             public bool IsStatic { get; private set; }
+
+            public bool IsGeneric { get; private set; }
+
+            public bool IsObsolete { get; private set; }
 
             public GUIContent Label { get; private set; }
 
@@ -4211,6 +4317,8 @@ namespace ExtendedEvents {
             public ParameterCache[] GetParameters(bool useForArgumentArray) => useForArgumentArray ? argumentParameters : parameters;
 
             public TypeCache[] GetParameterTypes(bool useForArgumentArray) => useForArgumentArray ? argumentParameterTypes : parameterTypes;
+
+            public TypeCache[] GetGenericArguments() => genericArguments;
         }
 
         private class MethodDefinition {

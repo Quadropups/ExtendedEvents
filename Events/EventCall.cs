@@ -35,8 +35,6 @@ namespace ExtendedEvents {
         #endregion
 
         protected EventCall(EventCall source) {
-            _id = source._id;
-
             _delayMode = source._delayMode;
 
             _methodName = source._methodName;
@@ -50,8 +48,9 @@ namespace ExtendedEvents {
             _definition = source._definition;
         }
 
-        public int argumentCount => arguments.Length;
+        public abstract int argumentCount { get; }
 
+        [Obsolete("This property is obsolete. Use GetArgumentAt and GetArgumentCount methods instead")]
         public abstract Argument[] arguments { get; }
 
         public int delayID => _delayID;
@@ -60,9 +59,9 @@ namespace ExtendedEvents {
 
         public float delayValue => _delayValue;
 
-        public bool enabled => _enabled;
+        public bool enabled { get => _enabled; set => _enabled = value; }
 
-        public int id => _id;
+        public int id { get => _id; set => _id = value; }
 
         public string methodName => _methodName;
 
@@ -87,9 +86,7 @@ namespace ExtendedEvents {
         public bool cacheReturnValue => (_definition & Definition.CacheReturnValue) != 0;
 
 
-        public Argument GetArgumentAt(int index) {
-            return arguments[index];
-        }
+        public abstract Argument GetArgumentAt(int index);
 
         public MethodInfo GetMethodInfo() => CachedData.GetMethodInfo(_methodName);
 
@@ -122,22 +119,16 @@ namespace ExtendedEvents {
 
         #endregion
 
-        public EventCall(EventCall source, TTag tag) : base(source) {
-            _tag = tag;
-        }
+        protected EventCall(EventCall source) : base(source) { }
 
-        protected EventCall(EventCall<TTag> source) : base(source) {
-            _tag = source._tag;
-        }
-
-        public TTag tag => _tag;
+        public TTag tag { get => _tag; set => _tag = value; }
 
         public override object GetTag() => _tag;
 
         public IEnumerable<TTag> GetTags() {
             yield return tag;
-            foreach (Argument argument in arguments) {
-                if (argument.TryGetTag(out TTag argTag)) {
+            for (int i = 0; i < argumentCount; i++) {
+                if (GetArgumentAt(i).TryGetTag(out TTag argTag)) {
                     yield return argTag;
                 }
             }
@@ -155,17 +146,53 @@ namespace ExtendedEvents {
 
         #endregion
 
-        public EventCall(EventCall source, TTag tag) : base(source, tag) {
+        [Obsolete("This constructor is obsolete")]
+        public EventCall(EventCall source, TTag tag) : base(source) {
 #if UNITY_EDITOR
             if (!(source.arguments is TArgument[])) Debug.LogError($"{source.arguments} can't be used as {typeof(TArgument[])}");
 #endif
+            this.id = source.id;
+            this.tag = tag;
             _arguments = source.arguments as TArgument[];
         }
 
+        /// <summary>
+        /// This constructor creates a shallow copy of original. Arguments field will reference the same array as source <see cref="EventCall"/>
+        /// </summary>
         public EventCall(EventCall<TTag, TArgument> source) : base(source) {
+            this.id = source.id;
+            this.tag = source.tag;
             _arguments = source._arguments;
         }
+        /// <summary>
+        /// This constructor creates a proper copy of the source <see cref="EventCall"/>. Arguments array must be the same length as original
+        /// </summary>
+        public EventCall(EventCall source, int id, TTag tag, TArgument[] arguments) : base(source) {
+            this.id = id;
+            this.tag = tag;
 
+            if (arguments == null) {
+#if UNITY_EDITOR
+                Debug.LogError($"arguments can't be null");
+#endif
+                enabled = false;
+            }
+
+            if (arguments.Length != source.argumentCount) {
+#if UNITY_EDITOR
+                Debug.LogError($"arguments array length is {arguments.Length}. It must be the same length as original: {source.argumentCount}");
+#endif
+                enabled = false;
+                return;
+            }
+            _arguments = arguments;
+        }
+
+        [Obsolete("This property is obsolete. Use GetArgumentAt and GetArgumentCount methods instead")]
         public override Argument[] arguments => _arguments;
+
+        public override int argumentCount => _arguments.Length;
+
+        public override Argument GetArgumentAt(int index) => _arguments[index];
     }
 }

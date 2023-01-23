@@ -75,6 +75,21 @@ namespace ExtendedEvents {
 #if UNITY_EDITOR
         [SerializeField] private bool _editorPreviewFlag;
 #endif
+
+
+        public Argument() { }
+
+        public Argument(Argument original) {
+            this._objectArgument = original._objectArgument;
+            this._stringArgument = original._stringArgument;
+            this._intArgument = original._intArgument;
+            this._floatArgument = original._floatArgument;
+            this._boolArgument = original._boolArgument;
+            this._vector3Argument = original._vector3Argument;
+            this._definition = original._definition;
+            this._editorPreviewFlag = original._editorPreviewFlag;
+        }
+
         public bool cacheReturnValue => (_definition & Definition.CacheReturnValue) != 0;
 
         public bool isReferencable {
@@ -169,16 +184,48 @@ namespace ExtendedEvents {
         /// <summary>Get serialized boolean field directly. Use this method only to cast Argument class instance to another type</summary>
         public bool GetBoolArgument() => _boolArgument;
 
+        /// <summary>Set serialized boolean field directly</summary>
+        public void SetBoolArgument(bool value) => _boolArgument = value;
+
         /// <summary>Get serialized float field directly. Use this method only to cast Argument class instance to another type</summary>
         public float GetFloatArgument() => _floatArgument;
+
+        /// <summary>Set serialized float field directly</summary>
+        public void SetFloatArgument(float value) => _floatArgument = value;
 
         public ArgType GetFuncArgType(int index) => GetFuncArgType((int)_definition, index);
 
         /// <summary>Get serialized integer field directly. Use this method only to cast Argument class instance to another type</summary>
         public int GetIntArgument() => _intArgument;
 
+        /// <summary>Set serialized integer field directly</summary>
+        public void SetIntArgument(int value) => _intArgument = value;
+
         /// <summary>Get serialized object field directly. Use this method only to cast Argument class instance to another type</summary>
         public Object GetObjectArgument() => _objectArgument;
+
+        /// <summary>Set serialized object field directly</summary>
+        public void SetObjectArgument(Object value) => _objectArgument = value;
+
+        /// <summary>Get serialized Vector3 field directly. Use this method only to cast Argument class instance to another type</summary>
+        public Vector3 GetVector3Argument() => _vector3Argument;
+
+        /// <summary>Set serialized Vector3 field directly</summary>
+        public void SetVector3Argument(Vector3 value) => _vector3Argument = value;
+
+        /// <summary>Get serialized string field directly. Use this method only to cast Argument class instance to another type</summary>
+        public string GetStringArgument() => _stringArgument;
+
+        /// <summary>Set serialized string field directly</summary>
+        public void SetStringArgument(string value) {
+            if (GetArgType() == ArgType.Method) {
+#if UNITY_EDITOR
+                Debug.LogError($"String argument can't be set with SetStringArgument method because it's a Serialized Function {_stringArgument}");
+#endif
+                return;
+            }
+            _stringArgument = value;
+        }
 
         public string GetReturnName(Type desiredType) {
             switch (GetArgType()) {
@@ -214,8 +261,6 @@ namespace ExtendedEvents {
             }
         }
 
-        /// <summary>Get serialized string field directly. Use this method only to cast Argument class instance to another type</summary>
-        public string GetStringArgument() => _stringArgument;
 
         /// <summary>
         /// This method is used to retrieve serialized data from <see cref="Argument"/>.
@@ -263,9 +308,6 @@ namespace ExtendedEvents {
                     return default;
             }
         }
-
-        /// <summary>Get serialized Vector3 field directly. Use this method only to cast Argument class instance to another type</summary>
-        public Vector3 GetVector3Argument() => _vector3Argument;
 
         public bool TryGetTag<TTag>(out TTag tag) {
             if (GetArgType() == ArgType.TagReference) {
